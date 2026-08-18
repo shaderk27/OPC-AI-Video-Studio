@@ -86,7 +86,7 @@ _uploads: Dict[str, dict] = {}
 # Health check
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.get("/")
+@app.get("/health")
 async def health():
     return {
         "service": "OPC AI Video Studio",
@@ -454,6 +454,21 @@ async def get_architecture():
             "social_media", "format", "quality",
         ],
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Web control panel bridge (M4) — /api/* endpoints for web/ + static serving
+# Registered AFTER all routes above; the catch-all web mount must come last
+# because Starlette matches routes in registration order.
+# ─────────────────────────────────────────────────────────────────────────────
+
+from api.webapp import router as web_router  # noqa: E402
+
+app.include_router(web_router)
+
+WEB_DIR = PROJECT_ROOT / "web"
+if WEB_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -27,6 +27,7 @@ Example:
 """
 
 import argparse
+import io
 import json
 import os
 import sys
@@ -40,7 +41,24 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
-console = Console()
+
+def _make_console() -> Console:
+    """Build a Console that cannot crash the pipeline.
+
+    When the pipeline runs inside a detached/background server process on
+    Windows, stdout may have no valid console handle; rich's legacy Windows
+    renderer then raises OSError [Errno 22] on flush. Probe once and fall
+    back to a null console so runs keep working headless.
+    """
+    try:
+        c = Console()
+        c.print("")  # probe — exercises the same write/flush path
+        return c
+    except OSError:
+        return Console(file=io.StringIO(), force_terminal=False, force_interactive=False)
+
+
+console = _make_console()
 
 
 def load_config(config_path: str) -> dict:
@@ -216,7 +234,10 @@ def run_studio(video_path: str, config: dict, skip_stages: list = None,
         except Exception as e:
             console.print(f"[red]Stage '{escape(stage)}' failed: {escape(str(e))}[/red]")
             import traceback
-            traceback.print_exc()
+            try:
+                traceback.print_exc()
+            except OSError:
+                pass  # stderr unavailable in detached server process
             if on_stage:
                 on_stage(stage, "failed", str(e))
             if stage in ("content_analysis", "clip", "subtitle"):  # Core stages - stop on failure
