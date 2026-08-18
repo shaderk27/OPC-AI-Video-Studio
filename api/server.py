@@ -1,710 +1,401 @@
 """
-OPC AI Video Studio — FastAPI Bridge
-=====================================
-Thin web layer that wraps the Python agent pipeline so the browser UI (web/)
-can drive it. Owned by M1 (System Architect); the API contract lives in
-web/API.md (M4). This implementation is a complete, honest wrapper so the
-demo works end-to-end today.
-
-Endpoints (see web/API.md):
-    GET  /api/config                 studio options & defaults
-    GET  /api/videos                 videos available in input/
-    POST /api/upload                 upload a video (multipart field "file")
-    POST /api/run                    start a pipeline run (background thread)
-    GET  /api/runs/{id}/events       SSE live progress
-    GET  /api/runs/{id}              status snapshot (poll fallback)
-    GET  /api/runs/{id}/clips        review-gate data (decisions + captions)
-    POST /api/runs/{id}/clips/{n}/decision
-    POST /api/runs/{id}/clips/{n}/caption
-    GET  /api/runs/{id}/manifest     output/manifest.json
-    GET  /api/runs/{id}/quality      output/quality_report.json
-    GET  /api/runs/{id}/downloads    ready-to-download artifact URLs
-Static:
-    /       -> web/          (frontend)
-    /output -> output/       (media gallery)
-
-Run with:  python scripts/start_web.py
-Env:       OPC_OUTPUT_DIR=<abs path>  overrides the output directory (testing).
-"""
-
-import json
-import os
-import queue
-import re
-import shutil
-import subprocess
-import threading
-import time
-import traceback
-from pathlib import Path
-from typing import Any, Dict, List, Optional
-
-import yaml
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-
-BASE_DIR = Path(__file__).resolve().parent.parent
-CONFIG_PATH = BASE_DIR / "config.yaml"
-INPUT_DIR = BASE_DIR / "input"
-OUTPUT_DIR = Path(os.environ.get("OPC_OUTPUT_DIR", str(BASE_DIR / "output")))
-WEB_DIR = BASE_DIR / "web"
-
-app = FastAPI(title="OPC AI Video Studio API", version="1.0.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+OPC AI Video Studio — FastAPI Server
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------------------------
-# Static files
-# ---------------------------------------------------------------------------
+# Project root
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+INPUT_DIR = PROJECT_ROOT / "input"
+OUTPUT_DIR = PROJECT_ROOT / "output"
+INPUT_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Serve generated output files (clips, thumbnails, subtitles, etc.)
 app.mount("/output", StaticFiles(directory=str(OUTPUT_DIR)), name="output")
-# NOTE: the catch-all web mount ("/") is registered at the END of this file,
-# AFTER all /api routes — Starlette matches routes in registration order, so a
-# "/" mount registered here would shadow every API endpoint with a 404.
+
+# Track uploaded videos: {video_id: {filename, path, size}}
+_uploads: Dict[str, dict] = {}
 
 
-# ---------------------------------------------------------------------------
-# Run registry (single-user demo: one active run at a time)
-# ---------------------------------------------------------------------------
-RUNS: Dict[str, Dict[str, Any]] = {}
-LOCK = threading.Lock()
-ACTIVE_RUN: Dict[str, bool] = {}
+# ─────────────────────────────────────────────────────────────────────────────
+# Health check
+# ─────────────────────────────────────────────────────────────────────────────
 
-
-def _new_run() -> Dict[str, Any]:
+@app.get("/")
+async def health():
     return {
-        "id": time.strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(2).hex(),
-        "status": "pending",          # pending | running | completed | failed
-        "queue": queue.Queue(),
-        "stages": {},                 # stage -> {status, elapsed}
-        "start_time": None,
-        "elapsed": 0.0,
-        "video": "",
-        "manifest": None,
-        "quality": None,
-        "decisions": {},              # index -> {decision, caption}
-        "log": [],
+        "service": "OPC AI Video Studio",
+        "status": "running",
+        "version": "1.0.0",
+        "endpoints": [
+            "POST /upload", "POST /run", "GET /status/{id}",
+            "GET /sse/{id}", "GET /clips/{id}", "POST /approve/{id}",
+            "GET /export/{id}", "GET /output/{path}",
+        ],
     }
 
 
-def _emit(run: Dict[str, Any], event: str, data: Any):
-    run["queue"].put({"event": event, "data": data})
-    run["log"].append((event, data))
+# ─────────────────────────────────────────────────────────────────────────────
+# Upload video
+# ─────────────────────────────────────────────────────────────────────────────
 
+@app.post("/upload", response_model=UploadResponse)
+async def upload_video(file: UploadFile = File(...)):
+    """Upload a video file to be processed by the studio."""
+    if not file.filename:
+        raise HTTPException(status_code=422, detail="No filename provided")
 
-# ---------------------------------------------------------------------------
-# Config helpers
-# ---------------------------------------------------------------------------
-LANGUAGES = [
-    {"code": "en", "name": "English"},
-    {"code": "zh", "name": "Chinese"},
-    {"code": "es", "name": "Spanish"},
-    {"code": "fr", "name": "French"},
-    {"code": "de", "name": "German"},
-    {"code": "ja", "name": "Japanese"},
-    {"code": "ko", "name": "Korean"},
-    {"code": "ar", "name": "Arabic"},
-    {"code": "hi", "name": "Hindi"},
-    {"code": "pt", "name": "Portuguese"},
-    {"code": "ru", "name": "Russian"},
-    {"code": "it", "name": "Italian"},
-    {"code": "tr", "name": "Turkish"},
-    {"code": "vi", "name": "Vietnamese"},
-    {"code": "th", "name": "Thai"},
-    {"code": "id", "name": "Indonesian"},
-]
-
-STAGES = [
-    {"id": "content_analysis", "name": "Content Analyzer", "role": "Video Content Intelligence Analyst"},
-    {"id": "clip", "name": "Clip Expert", "role": "Video Highlight Cutter"},
-    {"id": "subtitle", "name": "Subtitle Expert", "role": "Multi-Language Subtitle Generator"},
-    {"id": "audio", "name": "Audio Expert", "role": "Audio Translation & Voiceover"},
-    {"id": "thumbnail", "name": "Thumbnail Generator", "role": "Thumbnail Creator"},
-    {"id": "social_media", "name": "Social Media Copywriter", "role": "Content Strategist"},
-    {"id": "format", "name": "Format Adapter", "role": "Multi-Platform Formatter"},
-    {"id": "quality", "name": "Quality Reviewer", "role": "QA Specialist"},
-]
-
-
-def load_config() -> dict:
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-def _defaults(cfg: dict) -> dict:
-    sub = cfg.get("subtitle_agent", {})
-    aud = cfg.get("audio_agent", {})
-    clp = cfg.get("clip_agent", {})
-    fmt = cfg.get("format_agent", {})
-    qa = cfg.get("quality_agent", {})
-    return {
-        "subtitle_languages": sub.get("target_languages", ["en"]),
-        "subtitle_mode": "separate",
-        "subtitle_formats": sub.get("formats", ["srt", "vtt"]),
-        "audio_languages": aud.get("target_languages", ["zh"]),
-        "tts_engine": aud.get("tts_engine", "edge"),
-        "formats": [f["platform"] for f in fmt.get("formats", [])],
-        "stages": [s["id"] for s in STAGES],
-        "whisper_model": sub.get("whisper_model", "base"),
-        "max_clips": clp.get("max_clips", 5),
-        "min_clip_duration": clp.get("min_clip_duration", 15),
-        "max_clip_duration": clp.get("max_clip_duration", 60),
-        "detection_strategy": clp.get("detection_strategy", "combined"),
-        "padding_before": clp.get("padding_before", 1.5),
-        "padding_after": clp.get("padding_after", 1.0),
-        "snap_to_silence": clp.get("snap_to_silence", True),
-        "source_language": sub.get("source_language"),
-        "original_audio_volume": aud.get("original_audio_volume", 0.15),
-        "voiceover_volume": aud.get("voiceover_volume", 1.0),
-        "tts_speed": aud.get("tts_speed", 1.0),
-        "thumbnail_enabled": True,
-        "social_tone": cfg.get("social_media_agent", {}).get("tone", "energetic"),
-        "quality_checks": {
-            "av_sync": qa.get("check_av_sync", True),
-            "subtitle_sync": qa.get("check_subtitle_sync", True),
-            "silence_gaps": qa.get("check_silence_gaps", True),
-            "min_audio_level": qa.get("min_audio_level", -30),
-        },
-    }
-
-
-@app.get("/api/config")
-def api_config():
-    cfg = load_config()
-    formats = []
-    for f in cfg.get("format_agent", {}).get("formats", []):
-        if f.get("enabled", True):
-            formats.append(f)
-    return {
-        "project": cfg.get("project", {}).get("name", "OPC AI Video Studio"),
-        "languages": LANGUAGES,
-        "formats": formats,
-        "whisper_models": ["tiny", "base", "small", "medium", "large-v3"],
-        "detection_strategies": ["combined", "transcript", "audio_energy", "silence"],
-        "tts_engines": ["edge", "gtts"],
-        "tones": ["energetic", "casual", "professional", "educational"],
-        "stages": STAGES,
-        "defaults": _defaults(cfg),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Videos / upload
-# ---------------------------------------------------------------------------
-VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".ts"}
-
-
-@app.get("/api/videos")
-def api_videos():
-    videos = []
-    if INPUT_DIR.exists():
-        for p in sorted(INPUT_DIR.iterdir()):
-            if p.is_file() and p.suffix.lower() in VIDEO_EXTS:
-                videos.append({
-                    "name": p.name,
-                    "path": str(p.relative_to(BASE_DIR)).replace("\\", "/"),
-                    "size_mb": round(p.stat().st_size / (1024 * 1024), 1),
-                    "modified": time.strftime("%Y-%m-%d %H:%M", time.localtime(p.stat().st_mtime)),
-                })
-    return {"videos": videos}
-
-
-@app.post("/api/upload")
-async def api_upload(file: UploadFile = File(...)):
-    ext = Path(file.filename or "").suffix.lower()
-    if ext not in VIDEO_EXTS:
-        raise HTTPException(400, f"Unsupported video type '{ext}'. Allowed: {sorted(VIDEO_EXTS)}")
-    INPUT_DIR.mkdir(parents=True, exist_ok=True)
-    dest = INPUT_DIR / file.filename
-    with open(dest, "wb") as out:
-        shutil.copyfileobj(file.file, out)
-    return {"name": file.filename, "path": f"input/{file.filename}"}
-
-
-# ---------------------------------------------------------------------------
-# Run request
-# ---------------------------------------------------------------------------
-class RunRequest(BaseModel):
-    video: str
-    subtitle_languages: Optional[List[str]] = None
-    subtitle_mode: str = "separate"           # separate | burn | both
-    subtitle_formats: Optional[List[str]] = None
-    audio_languages: Optional[List[str]] = None
-    tts_engine: Optional[str] = None
-    formats: Optional[List[str]] = None
-    stages: Optional[List[str]] = None
-    whisper_model: Optional[str] = None
-    max_clips: Optional[int] = None
-    min_clip_duration: Optional[int] = None
-    max_clip_duration: Optional[int] = None
-    detection_strategy: Optional[str] = None
-    padding_before: Optional[float] = None
-    padding_after: Optional[float] = None
-    snap_to_silence: Optional[bool] = None
-    source_language: Optional[str] = None
-    original_audio_volume: Optional[float] = None
-    voiceover_volume: Optional[float] = None
-    tts_speed: Optional[float] = None
-    thumbnail_enabled: Optional[bool] = None
-    social_tone: Optional[str] = None
-    quality_checks: Optional[dict] = None
-
-
-def _apply_overrides(cfg: dict, req: RunRequest, run: dict):
-    d = _defaults(cfg)
-
-    def pick(v, default):
-        return v if v is not None else default
-
-    sub = cfg.setdefault("subtitle_agent", {})
-    sub["target_languages"] = pick(req.subtitle_languages, d["subtitle_languages"])
-    sub["formats"] = pick(req.subtitle_formats, d["subtitle_formats"])
-    sub["whisper_model"] = pick(req.whisper_model, d["whisper_model"])
-    sub["source_language"] = pick(req.source_language, d["source_language"])
-
-    aud = cfg.setdefault("audio_agent", {})
-    aud["target_languages"] = pick(req.audio_languages, d["audio_languages"])
-    aud["tts_engine"] = pick(req.tts_engine, d["tts_engine"])
-    aud["original_audio_volume"] = pick(req.original_audio_volume, d["original_audio_volume"])
-    aud["voiceover_volume"] = pick(req.voiceover_volume, d["voiceover_volume"])
-    aud["tts_speed"] = pick(req.tts_speed, d["tts_speed"])
-
-    clp = cfg.setdefault("clip_agent", {})
-    clp["max_clips"] = pick(req.max_clips, d["max_clips"])
-    clp["min_clip_duration"] = pick(req.min_clip_duration, d["min_clip_duration"])
-    clp["max_clip_duration"] = pick(req.max_clip_duration, d["max_clip_duration"])
-    clp["detection_strategy"] = pick(req.detection_strategy, d["detection_strategy"])
-    clp["padding_before"] = pick(req.padding_before, d["padding_before"])
-    clp["padding_after"] = pick(req.padding_after, d["padding_after"])
-    clp["snap_to_silence"] = pick(req.snap_to_silence, d["snap_to_silence"])
-
-    fmt = cfg.setdefault("format_agent", {})
-    selected = set(pick(req.formats, d["formats"]))
-    fmt["formats"] = [f for f in fmt.get("formats", []) if f.get("platform") in selected]
-
-    cfg.setdefault("social_media_agent", {})["tone"] = pick(req.social_tone, d["social_tone"])
-
-    qa = cfg.setdefault("quality_agent", {})
-    qc = pick(req.quality_checks, d["quality_checks"]) or {}
-    qa["check_av_sync"] = qc.get("av_sync", True)
-    qa["check_subtitle_sync"] = qc.get("subtitle_sync", True)
-    qa["check_silence_gaps"] = qc.get("silence_gaps", True)
-    qa["min_audio_level"] = qc.get("min_audio_level", -30)
-
-    # stage selection -> skip list
-    all_stages = [s["id"] for s in STAGES]
-    active = [s for s in all_stages if s in set(pick(req.stages, d["stages"]))]
-    if pick(req.thumbnail_enabled, True) is False and "thumbnail" in active:
-        active.remove("thumbnail")
-    skip = [s for s in all_stages if s not in active]
-
-    # output dir override (for tests)
-    if os.environ.get("OPC_OUTPUT_DIR"):
-        out = str(OUTPUT_DIR)
-        paths = cfg.setdefault("paths", {})
-        paths.update({
-            "output_dir": out,
-            "clips_dir": os.path.join(out, "clips"),
-            "subtitles_dir": os.path.join(out, "subtitles"),
-            "audio_dir": os.path.join(out, "audio"),
-            "thumbnails_dir": os.path.join(out, "thumbnails"),
-            "social_dir": os.path.join(out, "social"),
-        })
-
-    run["active_stages"] = active
-    return skip
-
-
-# ---------------------------------------------------------------------------
-# Background pipeline worker
-# ---------------------------------------------------------------------------
-def _run_worker(run_id: str, req: RunRequest):
-    run = RUNS[run_id]
-    run["status"] = "running"
-    run["start_time"] = time.time()
-    start = run["start_time"]
-    cfg = load_config()
-
-    try:
-        video_path = req.video
-        if not os.path.isabs(video_path):
-            video_path = str(BASE_DIR / video_path)
-        if not os.path.exists(video_path):
-            raise FileNotFoundError(f"Video not found: {req.video}")
-        run["video"] = video_path
-
-        skip = _apply_overrides(cfg, req, run)
-        run["stages"] = {s: {"status": "pending", "elapsed": 0.0} for s in run["active_stages"]}
-
-        _emit(run, "run_started", {
-            "run_id": run_id,
-            "video": os.path.basename(video_path),
-            "stages": run["active_stages"],
-        })
-
-        def on_stage(stage, status, message=None):
-            st = run["stages"].get(stage, {"status": "pending", "elapsed": 0.0})
-            if status == "started":
-                st.update(status="active", elapsed=0.0)
-                _emit(run, "stage_started", {
-                    "stage": stage, "index": run["active_stages"].index(stage) + 1,
-                    "total": len(run["active_stages"]),
-                    "name": next((s["name"] for s in STAGES if s["id"] == stage), stage),
-                    "role": next((s["role"] for s in STAGES if s["id"] == stage), ""),
-                })
-            elif status == "completed":
-                st.update(status="done", elapsed=round(time.time() - start, 1))
-                _emit(run, "stage_completed", {"stage": stage, "ok": True, "message": message or ""})
-            else:
-                st.update(status="failed", elapsed=round(time.time() - start, 1))
-                _emit(run, "stage_failed", {"stage": stage, "ok": False, "error": message or "failed"})
-
-        from main import run_studio
-        run_studio(
-            video_path=video_path,
-            config=cfg,
-            skip_stages=skip,
-            on_stage=on_stage,
+    # Basic validation — accept common video formats
+    allowed_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
+    ext = Path(file.filename).suffix.lower()
+    if ext not in allowed_exts:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported file type '{ext}'. Allowed: {allowed_exts}",
         )
 
-        # load manifest + quality FIRST (the burn pass reads the manifest)
-        out_dir = cfg.get("paths", {}).get("output_dir", "output")
-        manifest_path = os.path.join(out_dir, "manifest.json")
-        quality_path = os.path.join(out_dir, "quality_report.json")
-        if os.path.exists(manifest_path):
-            with open(manifest_path, "r", encoding="utf-8") as f:
-                run["manifest"] = json.load(f)
-        if os.path.exists(quality_path):
-            with open(quality_path, "r", encoding="utf-8") as f:
-                run["quality"] = json.load(f)
+    video_id = str(uuid.uuid4())[:8]
+    save_path = INPUT_DIR / f"{video_id}_{file.filename}"
 
-        # burn-in pass (embed subtitles into video) if requested
-        if req.subtitle_mode in ("burn", "both"):
-            _burn_subtitles(run, cfg, req.subtitle_languages or ["en"])
+    # Write the uploaded file
+    with open(save_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
 
-        run["status"] = "completed"
-        run["elapsed"] = round(time.time() - start, 1)
-        _emit(run, "run_completed", {
-            "run_id": run_id,
-            "elapsed": run["elapsed"],
-            "clips": len(run.get("manifest", {}).get("clips", [])),
-        })
-    except Exception as e:
-        run["status"] = "failed"
-        run["elapsed"] = round(time.time() - start, 1)
-        _emit(run, "run_failed", {"run_id": run_id, "error": f"{e}\n{traceback.format_exc()}"})
-    finally:
-        ACTIVE_RUN["busy"] = False
+    size = os.path.getsize(save_path)
 
-
-def _burn_subtitles(run: dict, cfg: dict, langs: list):
-    """Best-effort: burn each selected subtitle language into copies under output/burned/.
-
-    Uses cwd-relative paths inside the filter graph (absolute Windows paths with
-    '\\:' escapes are not reliably parsed by the subtitles filter), so we run
-    ffmpeg with cwd=output_dir and copy a CJK-capable font into output/fonts/.
-    """
-    import imageio_ffmpeg
-    import shutil
-    from utils.video_utils import get_video_info
-
-    out_dir = Path(cfg.get("paths", {}).get("output_dir", "output"))
-    manifest = run.get("manifest") or {}
-    if not manifest.get("clips"):
-        return
-
-    ff = imageio_ffmpeg.get_ffmpeg_exe()
-    burned_dir = out_dir / "burned"
-    fonts_dir = out_dir / "fonts"
-    burned_dir.mkdir(parents=True, exist_ok=True)
-    fonts_dir.mkdir(parents=True, exist_ok=True)
-
-    font_candidates = [
-        r"C:/Windows/Fonts/msyh.ttc",
-        r"C:/Windows/Fonts/simhei.ttf",
-        r"C:/Windows/Fonts/simsun.ttc",
-        r"C:/Windows/Fonts/arial.ttf",
-        "/System/Library/Fonts/PingFang.ttc",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ]
-    fontfile = next((p for p in font_candidates if os.path.exists(p)), None)
-    font_name = None
-    if fontfile:
-        try:
-            font_name = "studio_font" + os.path.splitext(fontfile)[1].lower()
-            shutil.copy(fontfile, fonts_dir / font_name)
-        except Exception as e:
-            _emit(run, "stage_log", {"stage": "format", "message": f"  burn: font copy failed ({e})"})
-            font_name = None
-
-    style = "FontName=Microsoft YaHei,FontSize=18,Alignment=2,MarginV=28"
-    style_esc = style.replace(",", "\\,")   # escape commas for the filter graph
-
-    for clip in manifest.get("clips", []):
-        clip_path = clip.get("path", "")
-        if not clip_path or not os.path.exists(clip_path):
-            continue
-        stem = os.path.splitext(os.path.basename(clip_path))[0]
-
-        for lang in langs:
-            sub_path = (clip.get("subtitles") or {}).get(lang, {}).get("formats", {}).get("srt", "")
-            if isinstance(sub_path, dict):       # tolerate {path, filename} shape
-                sub_path = sub_path.get("path", "")
-            if not sub_path or not os.path.exists(sub_path):
-                _emit(run, "stage_log", {"stage": "format", "message": f"  burn: no {lang} srt for {clip.get('filename')}"})
-                continue
-
-            out_path = os.path.abspath(str(burned_dir / f"{stem}_burn_{lang}.mp4"))
-            try:
-                # ffmpeg runs with cwd=output_dir: inputs/outputs must be absolute,
-                # but the srt path inside the filter graph must stay cwd-relative.
-                clip_abs = os.path.abspath(clip_path)
-                sub_abs = os.path.abspath(sub_path)
-                rel = os.path.relpath(sub_abs, os.path.abspath(out_dir)).replace("\\", "/")
-                if rel.startswith(".."):          # srt outside output dir -> copy next to the clip
-                    rel = os.path.basename(sub_path)
-                    shutil.copy(sub_path, os.path.join(out_dir, rel))
-                vf = f"subtitles=filename={rel}"
-                if font_name:
-                    vf += f":fontsdir=fonts"
-                vf += f":force_style={style_esc}"
-                proc = subprocess.run(
-                    [ff, "-y", "-i", clip_abs, "-vf", vf,
-                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                     "-c:a", "copy", out_path],
-                    capture_output=True, text=True, cwd=str(out_dir),
-                )
-                if os.path.exists(out_path):
-                    info = get_video_info(out_path)
-                    _emit(run, "stage_log", {"stage": "format",
-                                             "message": f"  burn OK: {os.path.basename(out_path)} ({info['width']}x{info['height']})"})
-                else:
-                    _emit(run, "stage_log", {"stage": "format",
-                                             "message": f"  burn FAILED (ffmpeg exit {proc.returncode}): {clip.get('filename')}"})
-            except Exception as e:
-                _emit(run, "stage_log", {"stage": "format", "message": f"  burn error: {e}"})
-
-
-# ---------------------------------------------------------------------------
-# Run endpoints
-# ---------------------------------------------------------------------------
-@app.post("/api/run")
-def api_run(req: RunRequest):
-    if ACTIVE_RUN.get("busy"):
-        raise HTTPException(409, "A run is already in progress. Wait for it to finish or refresh.")
-    run = _new_run()
-    run["video"] = req.video
-    RUNS[run["id"]] = run
-    ACTIVE_RUN["busy"] = True
-    threading.Thread(target=_run_worker, args=(run["id"], req), daemon=True).start()
-    return {"run_id": run["id"]}
-
-
-def _sse(event: str, data: Any) -> str:
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-
-@app.get("/api/runs/{run_id}/events")
-def api_run_events(run_id: str):
-    run = RUNS.get(run_id)
-    if not run:
-        raise HTTPException(404, "Run not found")
-
-    def gen():
-        yield _sse("run_started", {
-            "run_id": run_id,
-            "video": os.path.basename(run["video"]) if run["video"] else "",
-            "stages": run.get("active_stages", []),
-        })
-        for stage, st in run.get("stages", {}).items():
-            if st["status"] != "pending":
-                yield _sse("stage_" + ("completed" if st["status"] == "done" else "failed"),
-                           {"stage": stage, "ok": st["status"] == "done"})
-        while True:
-            try:
-                evt = run["queue"].get(timeout=15)
-            except queue.Empty:
-                if run["status"] in ("completed", "failed"):
-                    break
-                yield _sse("ping", {})
-                continue
-            yield _sse(evt["event"], evt["data"])
-            if evt["event"] in ("run_completed", "run_failed"):
-                break
-
-    return StreamingResponse(gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-
-@app.get("/api/runs/{run_id}")
-def api_run_status(run_id: str):
-    run = RUNS.get(run_id)
-    if not run:
-        raise HTTPException(404, "Run not found")
-    return {
-        "run_id": run_id,
-        "status": run["status"],
-        "elapsed": run["elapsed"],
-        "video": os.path.basename(run["video"]) if run["video"] else "",
-        "stages": run.get("stages", {}),
-        "clips_count": len((run.get("manifest") or {}).get("clips", [])),
+    _uploads[video_id] = {
+        "filename": file.filename,
+        "path": str(save_path),
+        "size": size,
     }
 
-
-def _social_copy_for(clip: dict) -> dict:
-    """Load the social copy JSON for a clip (captions/hashtags)."""
-    sc = clip.get("social_media")
-    if not sc:
-        return {}
-    path = sc.get("copy_file") if isinstance(sc, dict) else None
-    if not path or not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    return UploadResponse(
+        video_id=video_id,
+        filename=file.filename,
+        path=str(save_path),
+        size_bytes=size,
+    )
 
 
-@app.get("/api/runs/{run_id}/clips")
-def api_run_clips(run_id: str):
-    run = RUNS.get(run_id)
-    if not run or not run["manifest"]:
-        raise HTTPException(404, "Run not finished or no manifest yet")
-    items = []
-    for i, clip in enumerate(run["manifest"].get("clips", []), start=1):
-        social = _social_copy_for(clip)
-        first_platform = (social.get("TikTok") or social.get("YouTube Shorts") or
-                          social.get("Instagram Reels") or next(iter(social.values()), {}) or {})
-        decision = run["decisions"].get(str(i), {})
-        items.append({
-            "index": i,
+# ─────────────────────────────────────────────────────────────────────────────
+# Run pipeline
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/run", response_model=RunResponse)
+async def run_pipeline(request: RunRequest):
+    """Start the video processing pipeline for an uploaded video."""
+    # Check video exists
+    if request.video_id not in _uploads:
+        raise HTTPException(status_code=404, detail="Video not found. Upload first.")
+
+    upload = _uploads[request.video_id]
+    video_path = upload["path"]
+    video_name = Path(upload["filename"]).stem
+
+    # Load config and apply overrides
+    config = load_config()
+
+    if request.languages:
+        config.setdefault("subtitle_agent", {})["target_languages"] = request.languages
+        config.setdefault("audio_agent", {})["target_languages"] = request.languages
+
+    if request.max_clips:
+        config.setdefault("clip_agent", {})["max_clips"] = request.max_clips
+
+    if request.review_gate_enabled is not None:
+        config.setdefault("manager_agent", {})["review_gate_enabled"] = request.review_gate_enabled
+
+    # Start the run
+    run_id = runner.start_run(
+        video_path=video_path,
+        video_name=video_name,
+        config=config,
+        skip_stages=request.skip_stages,
+    )
+
+    return RunResponse(
+        run_id=run_id,
+        video_id=request.video_id,
+        status="running",
+        message="Pipeline started",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Status
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/status/{run_id}", response_model=RunStatus)
+async def get_status(run_id: str):
+    """Get the current status of a pipeline run."""
+    if not runner.run_exists(run_id):
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+
+    status = runner.get_status(run_id)
+    if not status:
+        raise HTTPException(status_code=500, detail="Failed to get status")
+
+    return RunStatus(**status)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SSE — real-time progress stream
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/sse/{run_id}")
+async def stream_progress(run_id: str):
+    """Stream pipeline progress events via Server-Sent Events (SSE)."""
+    if not runner.run_exists(run_id):
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+
+    async def event_generator():
+        """Generate SSE events from the pipeline runner."""
+        last_index = 0
+
+        while True:
+            # Get new events since last check
+            events = runner.get_events(run_id, after_index=last_index)
+
+            for event in events:
+                last_index += 1
+                event_type = event.get("event_type", "update")
+                data = event.get("data", {})
+                timestamp = event.get("timestamp", "")
+
+                # Format as SSE
+                sse_data = json.dumps({"data": data, "timestamp": timestamp})
+                yield f"event: {event_type}\ndata: {sse_data}\n\n"
+
+            # Check if pipeline is done
+            status = runner.get_status(run_id)
+            if status and status["status"] in ("complete", "error"):
+                # Send one final event
+                final_data = json.dumps({
+                    "status": status["status"],
+                    "run_id": run_id,
+                    "elapsed": status["elapsed_seconds"],
+                })
+                yield f"event: done\ndata: {final_data}\n\n"
+                break
+
+            # Brief pause before polling again (1 second)
+            await asyncio.sleep(1)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Clips
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/clips/{run_id}", response_model=ClipsResponse)
+async def get_clips(run_id: str):
+    """List all generated clips for a run."""
+    if not runner.run_exists(run_id):
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+
+    clips = runner.get_clips(run_id)
+    if clips is None:
+        clips = []
+
+    # Build clip info with relative paths for the /output static mount
+    clip_list = []
+    for clip in clips:
+        clip_path = clip.get("path", "")
+        # Convert absolute path to URL path for static serving
+        if clip_path and os.path.isabs(clip_path):
+            try:
+                rel = os.path.relpath(clip_path, str(OUTPUT_DIR))
+                clip_path = f"/output/{rel.replace(os.sep, '/')}"
+            except ValueError:
+                pass
+
+        clip_info = {
             "filename": clip.get("filename", ""),
-            "path": clip.get("path", ""),
-            "url": "/" + clip.get("path", "").replace("\\", "/").lstrip("/"),
+            "path": clip_path,
             "duration": clip.get("duration", 0),
             "start": clip.get("start", 0),
             "end": clip.get("end", 0),
             "title": clip.get("title", ""),
             "reason": clip.get("reason", ""),
-            "hook_score": None,  # M2: emotion-aware hook score lands here
-            "subtitle_langs": list((clip.get("subtitles") or {}).keys()),
-            "thumbnails": [t for t in (clip.get("thumbnails") or [])],
-            "caption": decision.get("caption") or first_platform.get("caption", ""),
-            "hashtags": decision.get("hashtags") or first_platform.get("hashtags", []),
-            "decision": decision.get("decision", "pending"),
+            "detected_language": clip.get("detected_language"),
+            "transcript_preview": clip.get("transcript_preview"),
+        }
+
+        # Add thumbnails if available
+        if clip.get("thumbnails"):
+            clip_info["thumbnails"] = []
+            for thumb in clip["thumbnails"]:
+                thumb_path = thumb.get("path", "")
+                if thumb_path and os.path.isabs(thumb_path):
+                    try:
+                        rel = os.path.relpath(thumb_path, str(OUTPUT_DIR))
+                        thumb_path = f"/output/{rel.replace(os.sep, '/')}"
+                    except ValueError:
+                        pass
+                clip_info["thumbnails"].append({
+                    "path": thumb_path,
+                    "filename": thumb.get("filename", ""),
+                    "timestamp": thumb.get("timestamp", 0),
+                })
+
+        # Add subtitles if available
+        if clip.get("subtitles"):
+            clip_info["subtitles"] = {}
+            for lang, lang_data in clip["subtitles"].items():
+                clip_info["subtitles"][lang] = {
+                    "formats": {},
+                    "segment_count": len(lang_data.get("segments", [])),
+                }
+                for fmt, fmt_data in lang_data.get("formats", {}).items():
+                    fmt_path = fmt_data.get("path", "")
+                    if fmt_path and os.path.isabs(fmt_path):
+                        try:
+                            rel = os.path.relpath(fmt_path, str(OUTPUT_DIR))
+                            fmt_path = f"/output/{rel.replace(os.sep, '/')}"
+                        except ValueError:
+                            pass
+                    clip_info["subtitles"][lang]["formats"][fmt] = {
+                        "path": fmt_path,
+                        "filename": fmt_data.get("filename", ""),
+                    }
+
+        # Add audio translations if available
+        if clip.get("audio_translations"):
+            clip_info["audio_translations"] = {}
+            for lang, lang_data in clip["audio_translations"].items():
+                clip_info["audio_translations"][lang] = {
+                    "video_path": lang_data.get("video_path", ""),
+                    "voiceover_path": lang_data.get("voiceover_path", ""),
+                }
+
+        # Add social media if available
+        if clip.get("social_media"):
+            clip_info["social_media"] = clip["social_media"]
+
+        # Add platform versions if available
+        if clip.get("platform_versions"):
+            clip_info["platform_versions"] = {}
+            for platform, pv_data in clip["platform_versions"].items():
+                pv_path = pv_data.get("path", "")
+                if pv_path and os.path.isabs(pv_path):
+                    try:
+                        rel = os.path.relpath(pv_path, str(OUTPUT_DIR))
+                        pv_path = f"/output/{rel.replace(os.sep, '/')}"
+                    except ValueError:
+                        pass
+                clip_info["platform_versions"][platform] = {
+                    "path": pv_path,
+                    "width": pv_data.get("width", 0),
+                    "height": pv_data.get("height", 0),
+                }
+
+        clip_list.append(clip_info)
+
+    return ClipsResponse(run_id=run_id, clips=clip_list, total=len(clip_list))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Approve — review gate
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/approve/{run_id}", response_model=ApproveResponse)
+async def approve_clips(run_id: str, request: ApproveRequest):
+    """Approve clips at the review gate and resume the pipeline."""
+    if not runner.run_exists(run_id):
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+
+    result = runner.approve(
+        run_id=run_id,
+        approved_indices=request.approved_indices,
+        edits=[e.model_dump() for e in request.edits] if request.edits else None,
+        approve_all=request.approve_all,
+    )
+
+    if not result:
+        raise HTTPException(status_code=500, detail="Failed to approve clips")
+
+    if "error" in result:
+        raise HTTPException(status_code=409, detail=result["error"])
+
+    return ApproveResponse(
+        run_id=run_id,
+        status=result.get("status", "resumed"),
+        approved_count=result.get("approved_count", 0),
+        message=result.get("message", "Pipeline resumed"),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Export
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/export/{run_id}", response_model=ExportResponse)
+async def export_run(run_id: str):
+    """Get export info for a completed run (manifest path + output directory)."""
+    if not runner.run_exists(run_id):
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+
+    manifest = runner.get_manifest(run_id)
+    if not manifest:
+        status = runner.get_status(run_id)
+        raise HTTPException(
+            status_code=409,
+            detail=f"Run not complete (status: {status['status'] if status else 'unknown'})",
+        )
+
+    return ExportResponse(
+        run_id=run_id,
+        manifest_path=manifest.get("manifest_path", ""),
+        clips_count=manifest.get("clips", []).__len__(),
+        output_dir=str(OUTPUT_DIR),
+        download_url=f"/output/manifest.json",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Architecture info (for the frontend / presentation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/architecture")
+async def get_architecture():
+    """Return the agent team structure and WorkBuddy expert mapping."""
+    from agents.manager_agent import STAGE_AGENTS, WORKBUDDY_EXPERT_MAP
+
+    agents = []
+    for stage, (module_path, class_name) in STAGE_AGENTS.items():
+        agents.append({
+            "stage": stage,
+            "class": class_name,
+            "expert": WORKBUDDY_EXPERT_MAP.get(stage, stage),
         })
-    return {"clips": items}
+
+    return {
+        "topology": "Supervisory (Hierarchical)",
+        "coordinator": "ManagerAgent",
+        "agents": agents,
+        "pipeline": [
+            "content_analysis", "clip",
+            "[HUMAN REVIEW GATE]",
+            "subtitle", "audio", "thumbnail",
+            "social_media", "format", "quality",
+        ],
+    }
 
 
-@app.post("/api/runs/{run_id}/clips/{index}/decision")
-def api_clip_decision(run_id: str, index: str, body: dict):
-    run = RUNS.get(run_id)
-    if not run:
-        raise HTTPException(404, "Run not found")
-    decision = body.get("decision")
-    if decision not in ("approved", "dropped", "pending"):
-        raise HTTPException(400, "decision must be approved|dropped|pending")
-    run["decisions"].setdefault(index, {})["decision"] = decision
-    return {"ok": True}
+# ─────────────────────────────────────────────────────────────────────────────
+# Run on import (for uvicorn)
+# ─────────────────────────────────────────────────────────────────────────────
 
-
-@app.post("/api/runs/{run_id}/clips/{index}/caption")
-def api_clip_caption(run_id: str, index: str, body: dict):
-    run = RUNS.get(run_id)
-    if not run:
-        raise HTTPException(404, "Run not found")
-    run["decisions"].setdefault(index, {})["caption"] = body.get("caption", "")
-    run["decisions"].setdefault(index, {})["hashtags"] = body.get("hashtags", [])
-    return {"ok": True}
-
-
-@app.get("/api/runs/{run_id}/manifest")
-def api_run_manifest(run_id: str):
-    run = RUNS.get(run_id)
-    if not run:
-        raise HTTPException(404, "Run not found")
-    return run.get("manifest") or {}
-
-
-@app.get("/api/runs/{run_id}/quality")
-def api_run_quality(run_id: str):
-    run = RUNS.get(run_id)
-    if not run:
-        raise HTTPException(404, "Run not found")
-    return run.get("quality") or {}
-
-
-@app.get("/api/runs/{run_id}/downloads")
-def api_run_downloads(run_id: str):
-    run = RUNS.get(run_id)
-    if not run or not run["manifest"]:
-        raise HTTPException(404, "Run not finished or no manifest yet")
-    out_dir = Path(OUTPUT_DIR)
-    def url(p):  # -> absolute URL path for <video src> / downloads
-        return "/" + str(p).replace("\\", "/").lstrip("/")
-
-    clips, subtitles, formatted, burned, audio, thumbs, social = [], [], [], [], [], [], []
-
-    # map platform -> aspect_ratio from config (manifest only stores paths)
-    ratio_of = {}
-    try:
-        for f in load_config().get("formats", []):
-            ratio_of[f.get("platform", "")] = f.get("aspect_ratio", "")
-    except Exception:
-        pass
-
-    def _aspect_from_path(p):
-        m = re.search(r"_(\d{2,5})x(\d{2,5})\.(mp4|mov|webm)$", os.path.basename(p))
-        return f"{m.group(1)}:{m.group(2)}" if m else ""
-
-    for clip in run["manifest"].get("clips", []):
-        p = clip.get("path", "")
-        if p and os.path.exists(p):
-            clips.append({"filename": os.path.basename(p), "url": url(p),
-                          "duration": clip.get("duration", 0), "title": clip.get("title", "")})
-        for lang, ld in (clip.get("subtitles") or {}).items():
-            for ext, sp in (ld.get("formats") or {}).items():
-                sp_path = sp.get("path", "") if isinstance(sp, dict) else str(sp)
-                if sp_path and os.path.exists(sp_path):
-                    subtitles.append({"filename": os.path.basename(sp_path), "url": url(sp_path),
-                                      "lang": lang, "ext": ext})
-        for lang, ld in (clip.get("audio_translations") or {}).items():
-            vp = ld.get("video_path", "") if isinstance(ld, dict) else ""
-            if vp and os.path.exists(vp):
-                audio.append({"filename": os.path.basename(vp), "url": url(vp), "lang": lang})
-        for plat, pv in (clip.get("platform_versions") or {}).items():
-            pp = pv.get("path", "") if isinstance(pv, dict) else str(pv)
-            if pp and os.path.exists(pp):
-                formatted.append({"platform": plat, "filename": os.path.basename(pp), "url": url(pp),
-                                  "aspect_ratio": (pv.get("aspect_ratio", "") if isinstance(pv, dict) else "")
-                                  or ratio_of.get(plat, "") or _aspect_from_path(pp)})
-        for t in (clip.get("thumbnails") or []):
-            tp = t.get("path", "") if isinstance(t, dict) else str(t)
-            if tp and os.path.exists(tp):
-                thumbs.append(url(tp))
-    burned_dir = out_dir / "burned"
-    if burned_dir.exists():
-        for p in sorted(burned_dir.glob("*.mp4")):
-            burned.append({"filename": p.name, "url": url(p)})
-    social_dir = out_dir / "social"
-    if social_dir.exists():
-        for p in sorted(social_dir.glob("*.json")):
-            social.append(url(p))
-    return {"clips": clips, "subtitles": subtitles, "audio": audio, "formatted": formatted,
-            "burned": burned, "thumbnails": thumbs, "social": social}
-
-
-# ---------------------------------------------------------------------------
-# Catch-all web mount — MUST stay after all /api routes (registration order!)
-# ---------------------------------------------------------------------------
-if WEB_DIR.exists():
-    app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("api.server:app", host="0.0.0.0", port=8000, reload=True)
