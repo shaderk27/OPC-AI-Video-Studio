@@ -91,8 +91,14 @@ def get_agent_role(stage: str) -> str:
 
 
 def run_studio(video_path: str, config: dict, skip_stages: list = None,
-               override_languages: str = None, override_max_clips: int = None):
-    """Run the full AI Video Studio pipeline."""
+               override_languages: str = None, override_max_clips: int = None,
+               on_stage: callable = None):
+    """Run the full AI Video Studio pipeline.
+
+    on_stage: optional callback(stage, status, message) invoked with
+              status in ("started", "completed", "failed"). Used by the
+              web backend (api/server.py) to stream live progress.
+    """
 
     skip_stages = skip_stages or []
     start_time = time.time()
@@ -137,6 +143,9 @@ def run_studio(video_path: str, config: dict, skip_stages: list = None,
         console.print(f"\n[bold cyan]{'='*60}[/bold cyan]")
         console.print(f"[bold cyan]Stage: {stage.upper()}[/bold cyan]")
         console.print(f"[bold cyan]{'='*60}[/bold cyan]")
+
+        if on_stage:
+            on_stage(stage, "started", None)
 
         try:
             if stage == "content_analysis":
@@ -198,10 +207,18 @@ def run_studio(video_path: str, config: dict, skip_stages: list = None,
                 result = agent.run(pipeline_data)
                 results["quality"] = result
 
+            if on_stage:
+                summary = {}
+                if stage == "clip":
+                    summary = {"clips": len(result.get("clips", []))}
+                on_stage(stage, "completed", summary)
+
         except Exception as e:
             console.print(f"[red]Stage '{escape(stage)}' failed: {escape(str(e))}[/red]")
             import traceback
             traceback.print_exc()
+            if on_stage:
+                on_stage(stage, "failed", str(e))
             if stage in ("content_analysis", "clip", "subtitle"):  # Core stages - stop on failure
                 console.print(f"[red]Core stage '{escape(stage)}' failed. Stopping pipeline.[/red]")
                 break
