@@ -69,9 +69,6 @@
         <div class="card">
           <div class="card-head"><h2>2 · Subtitles</h2><span class="hint">target languages</span></div>
 
-          <label class="field-label">Languages</label>
-          <div id="sub-langs" class="chips"></div>
-
           <label class="field-label">Deliver as</label>
           <div class="seg" id="subtitle-mode">
             <button type="button" class="seg-btn active" data-mode="separate">Separate files</button>
@@ -79,15 +76,20 @@
             <button type="button" class="seg-btn" data-mode="both">Both</button>
           </div>
           <div id="burn-row" class="burn-row hidden">
-            <label class="field-label">Language to burn in</label>
+            <label class="field-label">Primary burn language</label>
             <select id="burn-lang" class="input"></select>
-            <p class="micro-hint">Best-effort render via ffmpeg → <code>output/burned/</code></p>
+            <p class="micro-hint">Best-effort render via ffmpeg → <code>output/burned/</code>. All selected subtitle languages get a burned copy.</p>
           </div>
 
-          <label class="field-label">File formats</label>
-          <div class="check-row">
-            <label class="check"><input type="checkbox" id="sub-fmt-srt" checked><span>.srt</span></label>
-            <label class="check"><input type="checkbox" id="sub-fmt-vtt" checked><span>.vtt</span></label>
+          <label class="field-label">Languages</label>
+          <div id="sub-langs" class="chips"></div>
+
+          <div id="sub-fmts-row">
+            <label class="field-label">File formats</label>
+            <div class="check-row">
+              <label class="check"><input type="checkbox" id="sub-fmt-srt" checked><span>.srt</span></label>
+              <label class="check"><input type="checkbox" id="sub-fmt-vtt" checked><span>.vtt</span></label>
+            </div>
           </div>
         </div>
 
@@ -179,7 +181,10 @@
 
         <!-- Run -->
         <div class="run-bar">
-          <div class="run-summary" id="run-summary">Select a video and options to start.</div>
+          <div>
+            <div class="run-summary" id="run-summary">Select a video and options to start.</div>
+            <div class="run-error" id="run-error"></div>
+          </div>
           <button id="run-btn" class="btn btn-primary" disabled>▶ Run Studio</button>
         </div>
       </div>

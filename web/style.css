@@ -189,6 +189,7 @@ select.input { cursor: pointer; }
   backdrop-filter: blur(8px);
 }
 .run-summary { font-size: 13px; color: var(--text-dim); }
+.run-error { font-size: 12px; color: var(--err); margin-top: 4px; min-height: 16px; }
 
 /* ── buttons ── */
 .btn {

@@ -147,12 +147,18 @@ function renderSetup() {
   const cfg = state.config;
   const d = cfg.defaults;
 
-  // languages
-  buildChips($("#sub-langs"), cfg.languages, new Set(d.subtitle_languages), (code, on) => {
+  // languages — start empty so the user explicitly chooses
+  buildChips($("#sub-langs"), cfg.languages, new Set(), (code, on) => {
     on ? state.subLangs.add(code) : state.subLangs.delete(code);
+    // keep the primary burn language in sync with the first selected subtitle language
+    if (state.subLangs.size) {
+      const first = [...state.subLangs][0];
+      state.burnLang = first;
+      $("#burn-lang").value = first;
+    }
     updateRunSummary();
   });
-  buildChips($("#audio-langs"), cfg.languages, new Set(d.audio_languages), (code, on) => {
+  buildChips($("#audio-langs"), cfg.languages, new Set(), (code, on) => {
     on ? state.audioLangs.add(code) : state.audioLangs.delete(code);
     updateRunSummary();
   });
@@ -301,6 +307,8 @@ function renderFormats(formats, defaults) {
 function syncSeg() {
   $$("#subtitle-mode .seg-btn").forEach((b) => b.classList.toggle("active", b.dataset.mode === state.subtitleMode));
   $("#burn-row").classList.toggle("hidden", !["burn", "both"].includes(state.subtitleMode));
+  // file formats only matter when we are producing separate subtitle files
+  $("#sub-fmts-row").classList.toggle("hidden", state.subtitleMode === "burn");
 }
 
 /* ───────────────────────── videos ───────────────────────── */
@@ -426,13 +434,15 @@ function buildPayload() {
 /* ───────────────────────── start run ───────────────────────── */
 async function startRun() {
   const payload = buildPayload();
-  resetRunState();
-  showView("progress");
-  enableStep("review", false); enableStep("gallery", false);
-  $("#progress-video").textContent = payload.video.split("/").pop();
-  startClock();
+  const errBox = $("#run-error");
+  errBox.textContent = "";
 
   if (state.demo) {
+    resetRunState();
+    showView("progress");
+    enableStep("review", false); enableStep("gallery", false);
+    $("#progress-video").textContent = payload.video.split("/").pop();
+    startClock();
     state.runId = "demo-" + Date.now();
     logRun("run_started", { video: payload.video.split("/").pop(), stages: payload.stages });
     simulateRun(payload);
@@ -440,11 +450,17 @@ async function startRun() {
   }
   try {
     const { run_id } = await api("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    resetRunState();
+    showView("progress");
+    enableStep("review", false); enableStep("gallery", false);
+    $("#progress-video").textContent = payload.video.split("/").pop();
+    startClock();
     state.runId = run_id;
     connectSSE(run_id);
     startPolling(run_id);
   } catch (e) {
-    log("Failed to start run: " + e.message, "err");
+    errBox.textContent = "Failed to start run: " + e.message;
+    state.run = { status: null, stages: {}, elapsed: 0, video: "" };
   }
 }
 
@@ -806,8 +822,14 @@ function renderGallery() {
   // clips
   const grid = $("#gallery-grid");
   grid.innerHTML = "";
+  // group burned outputs by source clip stem + language: filename like <stem>_burn_<lang>.mp4
   const burnedByStem = {};
-  (state.downloads?.burned || []).forEach((b) => { burnedByStem[b.filename.replace(/_burn_.*\.mp4$/, "")] = b.url; });
+  (state.downloads?.burned || []).forEach((b) => {
+    const m = b.filename.match(/^(.+)_burn_([a-z]+)\.mp4$/i);
+    if (!m) return;
+    const [, stem, lang] = m;
+    (burnedByStem[stem] = burnedByStem[stem] || []).push({ lang, url: b.url });
+  });
 
   clips.forEach((clip, ci) => {
     const card = el("div", "g-clip");
@@ -829,8 +851,9 @@ function renderGallery() {
       if (pp) views.push({ id: "f_" + plat, label: plat + (typeof pv === "object" && pv.aspect_ratio ? ` (${pv.aspect_ratio})` : ""), url: "/" + pp.replace(/\\/g, "/").replace(/^\//, "") });
     });
     const stem = (clip.path || clip.filename || "").split(/[\\/]/).pop().replace(/\.mp4$/, "");
-    const bUrl = burnedByStem[stem];
-    if (bUrl) views.push({ id: "burned", label: `Burned (${(state.review[ci] && Object.keys(clip.subtitles || {})[0]) || "en"})`, url: bUrl });
+    (burnedByStem[stem] || []).forEach(({ lang, url: bUrl }) => {
+      views.push({ id: `burned_${lang}`, label: `Burned ${lang}`, url: bUrl });
+    });
 
     const links = [];
     Object.entries(clip.subtitles || {}).forEach(([lang, ld]) => Object.entries(ld.formats || {}).forEach(([ext, p]) => {
@@ -893,6 +916,7 @@ $$(".step").forEach((s) => s.addEventListener("click", () => {
 }));
 $("#new-run-btn").addEventListener("click", () => {
   if (state.pollTimer) clearInterval(state.pollTimer);
+  $("#run-error").textContent = "";
   showView("setup");
 });
 

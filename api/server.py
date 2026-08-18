@@ -389,7 +389,7 @@ def _run_worker(run_id: str, req: RunRequest):
 
         # burn-in pass (embed subtitles into video) if requested
         if req.subtitle_mode in ("burn", "both"):
-            _burn_subtitles(run, cfg, req.burn_language or "en")
+            _burn_subtitles(run, cfg, req.subtitle_languages or [req.burn_language or "en"])
 
         run["status"] = "completed"
         run["elapsed"] = round(time.time() - start, 1)
@@ -402,10 +402,12 @@ def _run_worker(run_id: str, req: RunRequest):
         run["status"] = "failed"
         run["elapsed"] = round(time.time() - start, 1)
         _emit(run, "run_failed", {"run_id": run_id, "error": f"{e}\n{traceback.format_exc()}"})
+    finally:
+        ACTIVE_RUN["busy"] = False
 
 
-def _burn_subtitles(run: dict, cfg: dict, lang: str):
-    """Best-effort: burn one subtitle language into copies under output/burned/.
+def _burn_subtitles(run: dict, cfg: dict, langs: list):
+    """Best-effort: burn each selected subtitle language into copies under output/burned/.
 
     Uses cwd-relative paths inside the filter graph (absolute Windows paths with
     '\\:' escapes are not reliably parsed by the subtitles filter), so we run
@@ -451,43 +453,45 @@ def _burn_subtitles(run: dict, cfg: dict, lang: str):
         clip_path = clip.get("path", "")
         if not clip_path or not os.path.exists(clip_path):
             continue
-        sub_path = (clip.get("subtitles") or {}).get(lang, {}).get("formats", {}).get("srt", "")
-        if isinstance(sub_path, dict):       # tolerate {path, filename} shape
-            sub_path = sub_path.get("path", "")
-        if not sub_path or not os.path.exists(sub_path):
-            _emit(run, "stage_log", {"stage": "format", "message": f"  burn: no {lang} srt for {clip.get('filename')}"})
-            continue
-
         stem = os.path.splitext(os.path.basename(clip_path))[0]
-        out_path = os.path.abspath(str(burned_dir / f"{stem}_burn_{lang}.mp4"))
-        try:
-            # ffmpeg runs with cwd=output_dir: inputs/outputs must be absolute,
-            # but the srt path inside the filter graph must stay cwd-relative.
-            clip_abs = os.path.abspath(clip_path)
-            sub_abs = os.path.abspath(sub_path)
-            rel = os.path.relpath(sub_abs, os.path.abspath(out_dir)).replace("\\", "/")
-            if rel.startswith(".."):          # srt outside output dir -> copy next to the clip
-                rel = os.path.basename(sub_path)
-                shutil.copy(sub_path, os.path.join(out_dir, rel))
-            vf = f"subtitles=filename={rel}"
-            if font_name:
-                vf += f":fontsdir=fonts"
-            vf += f":force_style={style_esc}"
-            proc = subprocess.run(
-                [ff, "-y", "-i", clip_abs, "-vf", vf,
-                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                 "-c:a", "copy", out_path],
-                capture_output=True, text=True, cwd=str(out_dir),
-            )
-            if os.path.exists(out_path):
-                info = get_video_info(out_path)
-                _emit(run, "stage_log", {"stage": "format",
-                                         "message": f"  burn OK: {os.path.basename(out_path)} ({info['width']}x{info['height']})"})
-            else:
-                _emit(run, "stage_log", {"stage": "format",
-                                         "message": f"  burn FAILED (ffmpeg exit {proc.returncode}): {clip.get('filename')}"})
-        except Exception as e:
-            _emit(run, "stage_log", {"stage": "format", "message": f"  burn error: {e}"})
+
+        for lang in langs:
+            sub_path = (clip.get("subtitles") or {}).get(lang, {}).get("formats", {}).get("srt", "")
+            if isinstance(sub_path, dict):       # tolerate {path, filename} shape
+                sub_path = sub_path.get("path", "")
+            if not sub_path or not os.path.exists(sub_path):
+                _emit(run, "stage_log", {"stage": "format", "message": f"  burn: no {lang} srt for {clip.get('filename')}"})
+                continue
+
+            out_path = os.path.abspath(str(burned_dir / f"{stem}_burn_{lang}.mp4"))
+            try:
+                # ffmpeg runs with cwd=output_dir: inputs/outputs must be absolute,
+                # but the srt path inside the filter graph must stay cwd-relative.
+                clip_abs = os.path.abspath(clip_path)
+                sub_abs = os.path.abspath(sub_path)
+                rel = os.path.relpath(sub_abs, os.path.abspath(out_dir)).replace("\\", "/")
+                if rel.startswith(".."):          # srt outside output dir -> copy next to the clip
+                    rel = os.path.basename(sub_path)
+                    shutil.copy(sub_path, os.path.join(out_dir, rel))
+                vf = f"subtitles=filename={rel}"
+                if font_name:
+                    vf += f":fontsdir=fonts"
+                vf += f":force_style={style_esc}"
+                proc = subprocess.run(
+                    [ff, "-y", "-i", clip_abs, "-vf", vf,
+                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                     "-c:a", "copy", out_path],
+                    capture_output=True, text=True, cwd=str(out_dir),
+                )
+                if os.path.exists(out_path):
+                    info = get_video_info(out_path)
+                    _emit(run, "stage_log", {"stage": "format",
+                                             "message": f"  burn OK: {os.path.basename(out_path)} ({info['width']}x{info['height']})"})
+                else:
+                    _emit(run, "stage_log", {"stage": "format",
+                                             "message": f"  burn FAILED (ffmpeg exit {proc.returncode}): {clip.get('filename')}"})
+            except Exception as e:
+                _emit(run, "stage_log", {"stage": "format", "message": f"  burn error: {e}"})
 
 
 # ---------------------------------------------------------------------------
