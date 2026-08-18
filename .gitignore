@@ -1,0 +1,21 @@
+# ── Generated output (clips, renders, subtitles, audio, reports) ──
+output/
+
+# ── Downloaded AI models (re-downloadable: python scripts/setup_whisper_model.py) ──
+models/whisper/
+
+# ── Raw input footage (videos are large; don't commit) ──
+# Remove this line if you want to track sample videos in the repo.
+input/
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ── Packaging / misc ──
+*.zip
+.DS_Store
+Thumbs.db
