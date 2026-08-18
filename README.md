@@ -38,7 +38,23 @@ Give it a 10+ minute raw video (travel vlog, lecture, match footage, etc.) and t
 pip install -r requirements.txt
 ```
 
-This installs: moviepy, imageio-ffmpeg (bundled ffmpeg, no system install needed), faster-whisper, deep-translator, gTTS, pyyaml, rich, pysrt, Pillow.
+This installs: moviepy, imageio-ffmpeg (bundled ffmpeg, no system install needed), faster-whisper, deep-translator, gTTS, pyyaml, rich, pysrt, Pillow, plus FastAPI/uvicorn for the web control panel.
+
+### 1b. Web Control Panel (optional, recommended for demos)
+
+```bash
+python scripts/start_web.py       # opens http://127.0.0.1:8000
+```
+
+The web UI wraps the whole pipeline — no CLI needed:
+
+- **Setup** — pick or upload a video, choose subtitle languages (separate subtitle files, burned directly into the video, or both), audio voiceover languages, and output formats (grouped by aspect ratio — TikTok/Shorts/Reels share one 1080×1920 render). Advanced options cover Whisper model size, clip count & durations, detection strategy, padding/snap-to-silence, TTS engine/speed/volumes, caption tone, thumbnails, quality checks, and per-agent toggles.
+- **Live progress** — real-time stage rail + log console (Server-Sent Events, with polling fallback).
+- **Review gate** — approve or drop each clip before it appears in the gallery; edit titles, captions and hashtags.
+- **Gallery** — download clips, subtitles, translated audio, formatted platform versions, thumbnails and social copy.
+- **Demo Mode** — if the backend isn't running, the UI plays a simulated run so you can preview the workflow anytime.
+
+API contract between the frontend and the FastAPI backend: `web/API.md`.
 
 ### 2. Configure Your Studio
 
