@@ -236,7 +236,6 @@ class RunRequest(BaseModel):
     video: str
     subtitle_languages: Optional[List[str]] = None
     subtitle_mode: str = "separate"           # separate | burn | both
-    burn_language: Optional[str] = "en"
     subtitle_formats: Optional[List[str]] = None
     audio_languages: Optional[List[str]] = None
     tts_engine: Optional[str] = None
@@ -389,7 +388,7 @@ def _run_worker(run_id: str, req: RunRequest):
 
         # burn-in pass (embed subtitles into video) if requested
         if req.subtitle_mode in ("burn", "both"):
-            _burn_subtitles(run, cfg, req.subtitle_languages or [req.burn_language or "en"])
+            _burn_subtitles(run, cfg, req.subtitle_languages or ["en"])
 
         run["status"] = "completed"
         run["elapsed"] = round(time.time() - start, 1)

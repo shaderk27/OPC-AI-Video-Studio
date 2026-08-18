@@ -86,8 +86,7 @@ Body (all fields optional; omitted → `defaults` from config):
 {
   "video": "input/Kayaking.mp4",
   "subtitle_languages": ["en", "zh"],
-  "subtitle_mode": "separate",
-  "burn_language": "en",
+  "subtitle_mode": "separate",          // "separate" | "burn" | "both"
   "subtitle_formats": ["srt", "vtt"],
   "audio_languages": ["zh"],
   "tts_engine": "edge",

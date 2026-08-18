@@ -44,7 +44,7 @@
 
       <!-- Source video -->
       <div class="card video-card">
-        <div class="card-head"><h2>1 · Source video</h2><span class="hint">raw footage (10+ min ideal)</span></div>
+        <div class="card-head"><h2>1 · Source video</h2><span class="hint"></span></div>
 
         <div id="dropzone" class="dropzone">
           <input type="file" id="file-input" accept="video/*" hidden>
@@ -76,9 +76,7 @@
             <button type="button" class="seg-btn" data-mode="both">Both</button>
           </div>
           <div id="burn-row" class="burn-row hidden">
-            <label class="field-label">Primary burn language</label>
-            <select id="burn-lang" class="input"></select>
-            <p class="micro-hint">Best-effort render via ffmpeg → <code>output/burned/</code>. All selected subtitle languages get a burned copy.</p>
+            <p class="micro-hint">Best-effort render via ffmpeg → <code>output/burned/</code>. Every selected subtitle language gets its own burned copy.</p>
           </div>
 
           <label class="field-label">Languages</label>
@@ -212,8 +210,8 @@
     <div class="card">
       <div class="card-head">
         <div>
-          <h2>3 · Review the AI team's work</h2>
-          <p class="sub">You're the boss — approve the clips you like, drop the rest, polish captions.</p>
+          <h2>3 · Review the AI team's output</h2>
+          <p class="sub">Approve the clips you like, drop the rest, polish captions.</p>
         </div>
         <div class="review-actions">
           <button id="review-approve-all" class="btn btn-ghost">Approve all</button>
@@ -246,7 +244,8 @@
 </main>
 
 <footer class="foot">
-  <span>OPC AI Video Studio — web control panel (M4) · API contract in <code>web/API.md</code></span>
+  <span>OPC AI Video Studio</code></span> <br>
+  <span>Created By: Alexander Liew - Thaedeus Tho - Randy Kwok - Lee Ho Yun - Lee Jae Won - Wen Xing</code></span>
 </footer>
 
 <script src="app.js"></script>

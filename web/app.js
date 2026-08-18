@@ -32,7 +32,6 @@ const state = {
   subLangs: new Set(),
   audioLangs: new Set(),
   subtitleMode: "separate",
-  burnLang: "en",
   formats: new Set(),
   stages: null,         // Set of active stage ids
   advanced: {},
@@ -150,12 +149,6 @@ function renderSetup() {
   // languages — start empty so the user explicitly chooses
   buildChips($("#sub-langs"), cfg.languages, new Set(), (code, on) => {
     on ? state.subLangs.add(code) : state.subLangs.delete(code);
-    // keep the primary burn language in sync with the first selected subtitle language
-    if (state.subLangs.size) {
-      const first = [...state.subLangs][0];
-      state.burnLang = first;
-      $("#burn-lang").value = first;
-    }
     updateRunSummary();
   });
   buildChips($("#audio-langs"), cfg.languages, new Set(), (code, on) => {
@@ -171,12 +164,6 @@ function renderSetup() {
     syncSeg();
   }));
 
-  // burn language select
-  const bl = $("#burn-lang");
-  cfg.languages.forEach((l) => bl.appendChild(el("option", "", `${esc(l.name)} (${l.code})`)).value = l.code);
-  bl.value = state.burnLang = d.burn_language || "en";
-  bl.addEventListener("change", () => { state.burnLang = bl.value; });
-
   // subtitle formats
   const sf = new Set(d.subtitle_formats || ["srt", "vtt"]);
   $("#sub-fmt-srt").checked = sf.has("srt");
@@ -185,8 +172,8 @@ function renderSetup() {
   // tts engine
   fillSelect($("#tts-engine"), cfg.tts_engines, d.tts_engine, (v) => state.advanced.tts_engine = v);
 
-  // formats grouped by aspect ratio
-  renderFormats(cfg.formats, d.formats);
+  // formats grouped by aspect ratio — start unticked so the user explicitly chooses
+  renderFormats(cfg.formats, []);
 
   // advanced
   fillSelect($("#adv-whisper"), cfg.whisper_models, d.whisper_model, (v) => state.advanced.whisper_model = v);
@@ -402,7 +389,6 @@ function buildPayload() {
     video: state.video.path,
     subtitle_languages: [...state.subLangs],
     subtitle_mode: state.subtitleMode,
-    burn_language: ["burn", "both"].includes(state.subtitleMode) ? state.burnLang : null,
     subtitle_formats: [($("#sub-fmt-srt").checked ? "srt" : null), ($("#sub-fmt-vtt").checked ? "vtt" : null)].filter(Boolean),
     audio_languages: [...state.audioLangs],
     tts_engine: state.advanced.tts_engine || d.tts_engine,
