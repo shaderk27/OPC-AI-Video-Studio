@@ -228,3 +228,22 @@ orchestrator:
     - "quality"       # Review quality
   # Verbose logging
   verbose: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Manager Agent Settings (Member 1 — System Architect)
+# Supervisory orchestrator with retry logic + human-in-the-loop review gate
+# ─────────────────────────────────────────────────────────────────────────────
+manager_agent:
+  # Maximum retry attempts per stage (0 = no retry, 1 = retry once)
+  max_retries: 1
+  # Timeout per stage in seconds (aborts if exceeded)
+  stage_timeout: 300
+  # Pause after Clip stage for human review of generated clips
+  review_gate_enabled: true
+  # Auto-approve all clips after this many seconds (prevents demo deadlock)
+  review_gate_timeout: 300
+  # Core stages — failure here stops the entire pipeline
+  core_stages:
+    - "content_analysis"
+    - "clip"
+    - "subtitle"

@@ -18,3 +18,12 @@ rich>=13.0.0            # Console UI (tables, panels, progress bars)
 pysrt>=1.1.2            # SRT subtitle file parsing and manipulation
 Pillow>=10.0.0          # Image processing (thumbnails, text overlays)
 numpy>=1.24.0           # Numerical operations (used by moviepy + content analysis)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Web API Layer (Member 1 — System Architect)
+# FastAPI backend with SSE streaming for the demo frontend
+# ─────────────────────────────────────────────────────────────────────────────
+fastapi>=0.104.0        # Web framework (REST API + SSE streaming)
+uvicorn>=0.24.0         # ASGI server (runs the FastAPI app)
+python-multipart>=0.0.6 # Multipart form parsing (file uploads)
+aiofiles>=23.0.0        # Async file I/O (static file serving)
