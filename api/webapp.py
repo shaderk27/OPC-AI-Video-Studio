@@ -563,7 +563,8 @@ def api_run_clips(run_id: str):
             "end": clip.get("end", 0),
             "title": clip.get("title", ""),
             "reason": clip.get("reason", ""),
-            "hook_score": None,  # M2: emotion-aware hook score lands here
+            "hook_score": clip.get("hook_score", 0),
+            "hook_score_breakdown": clip.get("hook_score_breakdown", {}),
             "subtitle_langs": list((clip.get("subtitles") or {}).keys()),
             "thumbnails": [t for t in (clip.get("thumbnails") or [])],
             "caption": decision.get("caption") or first_platform.get("caption", ""),

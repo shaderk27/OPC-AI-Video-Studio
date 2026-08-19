@@ -41,6 +41,7 @@ class QualityAgent(BaseAgent):
 
         report = {
             "total_clips": len(clips),
+            "average_hook_score": 0,
             "total_subtitles": 0,
             "total_audio_translations": 0,
             "issues": [],
@@ -52,6 +53,8 @@ class QualityAgent(BaseAgent):
             clip_report = {
                 "clip": clip["filename"],
                 "duration": clip.get("duration", 0),
+                "hook_score": clip.get("hook_score", 0),
+                "hook_score_breakdown": clip.get("hook_score_breakdown", {}),
                 "checks": {},
                 "issues": [],
                 "passed": True,
@@ -90,11 +93,18 @@ class QualityAgent(BaseAgent):
         # Generate summary
         total_issues = len(report["issues"])
         passed_clips = sum(1 for cr in report["clip_reports"] if cr["passed"])
+        hook_scores = [
+            float(clip.get("hook_score", 0)) for clip in clips
+        ]
+        report["average_hook_score"] = round(
+            sum(hook_scores) / len(hook_scores), 1
+        ) if hook_scores else 0
         report["summary"] = {
             "total_issues": total_issues,
             "clips_passed": passed_clips,
             "clips_failed": len(clips) - passed_clips,
             "pass_rate": f"{(passed_clips / len(clips) * 100):.0f}%" if clips else "N/A",
+            "average_hook_score": report["average_hook_score"],
         }
 
         # Save report

@@ -351,6 +351,8 @@ def save_manifest(pipeline_data: dict, results: dict, elapsed: float, config: di
             "title": clip.get("title", ""),
             "reason": clip.get("reason", ""),
             "detected_language": clip.get("detected_language", ""),
+            "hook_score": clip.get("hook_score", 0),
+            "hook_score_breakdown": clip.get("hook_score_breakdown", {}),
         }
 
         if clip.get("subtitles"):

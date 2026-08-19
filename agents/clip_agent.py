@@ -17,6 +17,7 @@ Output: A set of short clips saved to the clips directory.
 """
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -159,6 +160,8 @@ class ClipAgent(BaseAgent):
                 "audio_energy_score": hl.get("audio_energy_score", 0),
                 "audio_energy_db": hl.get("audio_energy_db"),
                 "fusion_bonus": hl.get("fusion_bonus", 0),
+                "hook_score": hl.get("hook_score", 0),
+                "hook_score_breakdown": hl.get("hook_score_breakdown", {}),
             })
 
         self.log(f"Created {len(clips)} clips from {video_name}")
@@ -195,6 +198,7 @@ class ClipAgent(BaseAgent):
         # Combine emotional and audio evidence before overlapping candidates are
         # deduplicated, so corroborating signals reinforce rather than compete.
         highlights = self._fuse_emotion_and_energy(highlights)
+        highlights = self._score_hooks(highlights)
 
         # Deduplicate overlapping highlights (keep highest scoring)
         highlights = self._deduplicate_highlights(highlights)
@@ -476,6 +480,86 @@ class ClipAgent(BaseAgent):
             hl["audio_energy_db"] = strongest.get("audio_energy_db")
             hl["fusion_bonus"] = fusion_bonus
             hl["reason"] = f"{hl['reason']}; emotional + audio peak"
+
+        return highlights
+
+    def _score_hooks(self, highlights: List[Dict]) -> List[Dict]:
+        """Calculate an explainable 0-100 engagement hook score.
+
+        The score measures the candidate itself and is intentionally separate
+        from topic relevance. Step 5 combines the two for final ranking.
+        """
+        weights = {
+            "opening_strength": 0.25,
+            "emotional_intensity": 0.20,
+            "audio_energy": 0.20,
+            "specificity": 0.20,
+            "standalone_coherence": 0.15,
+        }
+
+        for hl in highlights:
+            text = (hl.get("text_preview") or hl.get("title") or "").strip()
+            tokens = re.findall(r"[A-Za-z0-9']+|[\u4e00-\u9fff]", text)
+            lower_text = text.lower()
+            opening_text = lower_text[:80]
+
+            opening = 20.0 if text else 0.0
+            if re.search(r"[?!？！]", opening_text):
+                opening += 25.0
+            hook_cues = (
+                "how", "why", "what", "watch", "look", "wait", "never",
+                "secret", "imagine", "this", "here", "看", "为什么",
+                "竟然", "原来", "没想到",
+            )
+            if any(cue in opening_text for cue in hook_cues):
+                opening += 35.0
+            if 4 <= len(tokens) <= 30:
+                opening += 20.0
+            opening = min(100.0, opening)
+
+            intensity = max(0.0, float(hl.get("sentiment_intensity", 0)))
+            emotional = min(100.0, intensity / 3.0 * 100.0)
+            audio = min(100.0, max(0.0, float(hl.get("audio_energy_score", 0))))
+
+            stop_words = {
+                "a", "an", "and", "are", "at", "but", "for", "from",
+                "in", "is", "it", "of", "on", "or", "that", "the",
+                "this", "to", "was", "with", "you",
+            }
+            content_tokens = {
+                token.lower() for token in tokens
+                if token.lower() not in stop_words
+            }
+            specificity = min(60.0, len(content_tokens) * 7.5)
+            if re.search(r"\d", text):
+                specificity += 20.0
+            proper_nouns = re.findall(r"\b[A-Z][a-z]{2,}\b", text)
+            if len(proper_nouns) >= 2 or re.search(r"[\u4e00-\u9fff]{2,}", text):
+                specificity += 20.0
+            specificity = min(100.0, specificity)
+
+            coherence = 20.0 if text else 0.0
+            if 4 <= len(tokens) <= 40:
+                coherence += 40.0
+            if re.search(r"[.!?。！？][\"']?$", text):
+                coherence += 25.0
+            if text and not text.startswith(("...", "…")) and \
+                    not text.endswith(("...", "…")):
+                coherence += 15.0
+            coherence = min(100.0, coherence)
+
+            components = {
+                "opening_strength": round(opening, 1),
+                "emotional_intensity": round(emotional, 1),
+                "audio_energy": round(audio, 1),
+                "specificity": round(specificity, 1),
+                "standalone_coherence": round(coherence, 1),
+            }
+            hook_score = sum(
+                components[name] * weight for name, weight in weights.items()
+            )
+            hl["hook_score"] = round(min(100.0, max(0.0, hook_score)), 1)
+            hl["hook_score_breakdown"] = components
 
         return highlights
 

@@ -368,6 +368,8 @@ class ManagerAgent(BaseAgent):
                 "title": clip.get("title", f"Clip {i+1}"),
                 "reason": clip.get("reason", ""),
                 "transcript_preview": clip.get("transcript_preview", ""),
+                "hook_score": clip.get("hook_score", 0),
+                "hook_score_breakdown": clip.get("hook_score_breakdown", {}),
             })
 
         self._emit("review_ready", {
@@ -528,6 +530,8 @@ class ManagerAgent(BaseAgent):
                 "title": clip.get("title", ""),
                 "reason": clip.get("reason", ""),
                 "detected_language": clip.get("detected_language", ""),
+                "hook_score": clip.get("hook_score", 0),
+                "hook_score_breakdown": clip.get("hook_score_breakdown", {}),
             }
 
             if clip.get("subtitles"):
