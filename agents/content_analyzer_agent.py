@@ -279,6 +279,8 @@ class ContentAnalyzerAgent(BaseAgent):
     def _analyze_sentiment(self, segments: List[Dict]) -> Dict:
         """
         Track sentiment across the video using lexicon-based scoring.
+        Polarity is the signed balance of positive and negative words, while
+        intensity counts all emotional words so mixed emotions do not cancel.
         Returns overall sentiment + per-segment scores + emotional arc.
         """
         segment_scores = []
@@ -293,6 +295,9 @@ class ContentAnalyzerAgent(BaseAgent):
                     "start": seg["start"],
                     "end": seg["end"],
                     "score": 0,
+                    "intensity": 0,
+                    "positive_hits": 0,
+                    "negative_hits": 0,
                     "label": "neutral",
                 })
                 continue
@@ -300,6 +305,7 @@ class ContentAnalyzerAgent(BaseAgent):
             pos_hits = sum(1 for w in words if w.lower() in POSITIVE_WORDS)
             neg_hits = sum(1 for w in words if w.lower() in NEGATIVE_WORDS)
             score = pos_hits - neg_hits
+            intensity = pos_hits + neg_hits
 
             if score > 0:
                 label = "positive"
@@ -315,6 +321,7 @@ class ContentAnalyzerAgent(BaseAgent):
                 "start": seg["start"],
                 "end": seg["end"],
                 "score": score,
+                "intensity": intensity,
                 "positive_hits": pos_hits,
                 "negative_hits": neg_hits,
                 "label": label,
@@ -351,11 +358,16 @@ class ContentAnalyzerAgent(BaseAgent):
                 end_idx = int((i + 1) * bucket_size)
                 bucket = segment_scores[start_idx:end_idx]
                 avg_score = sum(s["score"] for s in bucket) / len(bucket) if bucket else 0
+                avg_intensity = (
+                    sum(s["intensity"] for s in bucket) / len(bucket)
+                    if bucket else 0
+                )
                 arc.append({
                     "bucket": i + 1,
                     "start_time": bucket[0]["start"] if bucket else 0,
                     "end_time": bucket[-1]["end"] if bucket else 0,
                     "avg_score": round(avg_score, 2),
+                    "avg_intensity": round(avg_intensity, 2),
                     "label": "positive" if avg_score > 0 else
                              ("negative" if avg_score < 0 else "neutral"),
                 })
@@ -643,11 +655,18 @@ class ContentAnalyzerAgent(BaseAgent):
         for seg in segments:
             start_key = round(seg["start"], 1)
             d_score = density_map.get(start_key, {}).get("density_score", 0)
-            s_score = abs(sentiment_map.get(start_key, {}).get("score", 0))
+            sentiment_data = sentiment_map.get(start_key, {})
+            s_score = sentiment_data.get(
+                "intensity", abs(sentiment_data.get("score", 0))
+            )
 
-            # Keyword bonus
+            # Count both positive and negative emotional language. Negative or
+            # mixed moments can be just as compelling as positive moments.
             words = self._tokenize(seg["text"])
-            keyword_hits = sum(1 for w in words if w.lower() in POSITIVE_WORDS)
+            keyword_hits = sum(
+                1 for w in words
+                if w.lower() in POSITIVE_WORDS or w.lower() in NEGATIVE_WORDS
+            )
 
             # Length penalty for very short or very long segments
             duration = seg["end"] - seg["start"]
@@ -657,7 +676,10 @@ class ContentAnalyzerAgent(BaseAgent):
             elif duration > 30:
                 length_factor = 0.7
 
-            combined_score = (d_score + s_score * 15 + keyword_hits * 5) * length_factor
+            # Emotional hits previously received 15 points via sentiment and
+            # 5 via the positive-only keyword bonus. Keep that effective weight
+            # while using non-cancelling intensity for all emotional language.
+            combined_score = (d_score + s_score * 20) * length_factor
 
             scored_moments.append({
                 "start": round(seg["start"], 1),
@@ -667,6 +689,7 @@ class ContentAnalyzerAgent(BaseAgent):
                 "text_preview": seg["text"][:120],
                 "density_score": d_score,
                 "sentiment_score": s_score,
+                "sentiment_polarity": sentiment_data.get("score", 0),
                 "keyword_hits": keyword_hits,
                 "combined_score": round(combined_score, 1),
             })
