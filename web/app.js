@@ -128,7 +128,8 @@ async function boot() {
     state.demo = true;
     state.config = DEMO_CONFIG;
     setBadge("demo");
-    $("#demo-banner").classList.remove("hidden");
+    const db = $("#demo-banner");
+    if (db) db.classList.remove("hidden");
     log("Demo Mode: backend not reachable — using simulated pipeline.", "warn");
   }
   renderSetup();
@@ -265,27 +266,29 @@ function renderFormats(formats, defaults) {
   const groups = {};
   formats.forEach((f) => (groups[f.aspect_ratio] = groups[f.aspect_ratio] || []).push(f));
   const wrap = $("#format-options");
+  if (!wrap) { console.warn("renderFormats: #format-options missing in DOM"); return; }
   wrap.innerHTML = "";
   Object.entries(groups).forEach(([ratio, fmts]) => {
     const g = el("div", "fmt-group");
-    g.appendChild(el("div", "fmt-group-head", `<span class="ratio-badge">${esc(ratio)}</span>${esc(ratio)} — one shared render`));
+    // one shared render per aspect ratio — collapse the group into a single checkbox
+    const platforms = fmts.map((f) => f.platform);
+    const anyOn = platforms.some((p) => state.formats.has(p) || defaults.includes(p));
+    if (anyOn) platforms.forEach((p) => state.formats.add(p)); // normalize: group is all-or-nothing
+    const size = `${fmts[0].width}×${fmts[0].height}`;
+    const label = platforms.join(" · ");
+    g.appendChild(el("div", "fmt-group-head", `<span class="ratio-badge">${esc(ratio)}</span>${esc(size)}`));
     const opts = el("div", "fmt-options");
-    fmts.forEach((f) => {
-      const lb = el("label", "check");
-      const cb = el("input");
-      cb.type = "checkbox";
-      cb.checked = defaults.includes(f.platform);
-      if (cb.checked) state.formats.add(f.platform);
-      cb.addEventListener("change", () => {
-        cb.checked ? state.formats.add(f.platform) : state.formats.delete(f.platform);
-        updateRunSummary();
-      });
-      const size = el("small", "", ` ${f.width}×${f.height}`);
-      lb.appendChild(cb);
-      lb.appendChild(el("span", "", `${esc(f.platform)}`));
-      lb.appendChild(size);
-      opts.appendChild(lb);
+    const lb = el("label", "check");
+    const cb = el("input");
+    cb.type = "checkbox";
+    cb.checked = anyOn;
+    cb.addEventListener("change", () => {
+      platforms.forEach((p) => (cb.checked ? state.formats.add(p) : state.formats.delete(p)));
+      updateRunSummary();
     });
+    lb.appendChild(cb);
+    lb.appendChild(el("span", "", `${esc(label)} <small>${esc(size)}</small>`));
+    opts.appendChild(lb);
     g.appendChild(opts);
     wrap.appendChild(g);
   });

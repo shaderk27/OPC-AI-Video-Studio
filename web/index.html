@@ -44,16 +44,16 @@
 
       <!-- Source video -->
       <div class="card video-card">
-        <div class="card-head"><h2>1 · Source video</h2><span class="hint"></span></div>
+        <div class="card-head"><h2>1 · Source Video</h2><span class="hint"></span></div>
 
         <div id="dropzone" class="dropzone">
           <input type="file" id="file-input" accept="video/*" hidden>
           <div class="dz-icon">⤴</div>
-          <p><strong>Drop a video here</strong> or <a id="dz-browse" href="#">browse</a></p>
+          <p><strong>Drop or Insert a video here</strong> or <a id="dz-browse" href="#">Browse</a></p>
           <p class="dz-sub">mp4 · mov · mkv · webm — saved to <code>input/</code></p>
         </div>
 
-        <div class="video-list-head"><span>Available videos</span><span id="video-count"></span></div>
+        <div class="video-list-head"><span>Available Videos</span><span id="video-count"></span></div>
         <div id="video-list" class="video-list"><div class="muted">Loading…</div></div>
 
         <div id="selected-video" class="selected-video hidden">
@@ -67,23 +67,23 @@
 
         <!-- Subtitles -->
         <div class="card">
-          <div class="card-head"><h2>2 · Subtitles</h2><span class="hint">target languages</span></div>
+          <div class="card-head"><h2>2 · Subtitles</h2><span class="hint">Target Languages</span></div>
 
           <label class="field-label">Deliver as</label>
           <div class="seg" id="subtitle-mode">
-            <button type="button" class="seg-btn active" data-mode="separate">Separate files</button>
-            <button type="button" class="seg-btn" data-mode="burn">Burned into video</button>
+            <button type="button" class="seg-btn active" data-mode="separate">External Subtitle Files</button>
+            <button type="button" class="seg-btn" data-mode="burn">Embedded into Video</button>
             <button type="button" class="seg-btn" data-mode="both">Both</button>
           </div>
           <div id="burn-row" class="burn-row hidden">
-            <p class="micro-hint">Best-effort render via ffmpeg → <code>output/burned/</code>. Every selected subtitle language gets its own burned copy.</p>
+            <p class="micro-hint">Best-effort render via ffmpeg → <code>output/burned/</code>. Every selected subtitle language gets its own embedded copy.</p>
           </div>
 
           <label class="field-label">Languages</label>
           <div id="sub-langs" class="chips"></div>
 
           <div id="sub-fmts-row">
-            <label class="field-label">File formats</label>
+            <label class="field-label">Subtitle File Formats</label>
             <div class="check-row">
               <label class="check"><input type="checkbox" id="sub-fmt-srt" checked><span>.srt</span></label>
               <label class="check"><input type="checkbox" id="sub-fmt-vtt" checked><span>.vtt</span></label>
@@ -93,7 +93,7 @@
 
         <!-- Audio -->
         <div class="card">
-          <div class="card-head"><h2>3 · Audio voiceover</h2><span class="hint">AI dubbing</span></div>
+          <div class="card-head"><h2>3 · Audio Voiceover</h2><span class="hint">AI Dubbing</span></div>
           <label class="field-label">Translate audio into</label>
           <div id="audio-langs" class="chips"></div>
           <label class="field-label">TTS engine</label>
@@ -103,7 +103,7 @@
 
         <!-- Formats -->
         <div class="card">
-          <div class="card-head"><h2>4 · Output formats</h2><span class="hint">platform targets</span></div>
+          <div class="card-head"><h2>4 · Output Formats</h2><span class="hint">Target Platforms</span></div>
           <div id="format-options" class="fmt-groups"></div>
           <p class="micro-hint">Platforms sharing the same aspect ratio are rendered <strong>once</strong> and reused.</p>
         </div>
@@ -111,14 +111,14 @@
         <!-- Advanced -->
         <div class="card">
           <button type="button" class="card-head card-head-btn" id="advanced-toggle">
-            <h2>⚙ Advanced options</h2><span class="chevron">▾</span>
+            <h2>⚙ Advanced Options</h2><span class="chevron">▾</span>
           </button>
           <div id="advanced-body" class="advanced-body hidden">
             <div class="form-grid">
               <div class="field">
-                <label class="field-label">Whisper model</label>
+                <label class="field-label">Whisper Model</label>
                 <select id="adv-whisper" class="input"></select>
-                <p class="micro-hint">bigger = slower but more accurate</p>
+                <p class="micro-hint">Larger = longer processing duration but more accurate</p>
               </div>
               <div class="field">
                 <label class="field-label">Max clips</label>
@@ -180,7 +180,7 @@
         <!-- Run -->
         <div class="run-bar">
           <div>
-            <div class="run-summary" id="run-summary">Select a video and options to start.</div>
+            <div class="run-summary" id="run-summary">Select a video and processing options to begin.</div>
             <div class="run-error" id="run-error"></div>
           </div>
           <button id="run-btn" class="btn btn-primary" disabled>▶ Run Studio</button>
@@ -214,9 +214,9 @@
           <p class="sub">Approve the clips you like, drop the rest, polish captions.</p>
         </div>
         <div class="review-actions">
-          <button id="review-approve-all" class="btn btn-ghost">Approve all</button>
-          <button id="review-drop-all" class="btn btn-ghost">Drop all</button>
-          <button id="review-next" class="btn btn-primary" disabled>Continue to gallery →</button>
+          <button id="review-approve-all" class="btn btn-ghost">Approve All Clips</button>
+          <button id="review-drop-all" class="btn btn-ghost">Drop All Clips</button>
+          <button id="review-next" class="btn btn-primary" disabled>Continue to Gallery →</button>
         </div>
       </div>
       <div id="review-grid" class="review-grid"><div class="muted">Loading…</div></div>
@@ -227,14 +227,14 @@
   <section id="view-gallery" class="view hidden">
     <div class="card">
       <div class="card-head">
-        <div><h2>4 · Gallery &amp; export</h2><p class="sub" id="gallery-subtitle"></p></div>
-        <button id="new-run-btn" class="btn btn-ghost">↺ New run</button>
+        <div><h2>4 · Gallery &amp; Export</h2><p class="sub" id="gallery-subtitle"></p></div>
+        <button id="new-run-btn" class="btn btn-ghost">↺ New Video</button>
       </div>
       <div id="metrics-strip" class="metrics-strip"></div>
     </div>
 
     <div class="card" id="quality-card">
-      <div class="card-head"><h2>Quality report</h2><span id="quality-badge" class="badge badge-pending">—</span></div>
+      <div class="card-head"><h2>Quality Report</h2><span id="quality-badge" class="badge badge-pending">—</span></div>
       <div id="quality-body" class="quality-body"></div>
     </div>
 
@@ -248,6 +248,6 @@
   <span>Created By: Alexander Liew - Thaedeus Tho - Randy Kwok - Lee Ho Yun - Lee Jae Won - Wen Xing</code></span>
 </footer>
 
-<script src="app.js"></script>
+<script src="app.js?v=20260819-2"></script>
 </body>
 </html>

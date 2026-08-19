@@ -528,11 +528,21 @@ def api_run_status(run_id: str):
 
 
 def _social_copy_for(clip: dict) -> dict:
-    """Load the social copy JSON for a clip (captions/hashtags)."""
+    """Load the social copy JSON for a clip (captions/hashtags).
+
+    Tolerates two manifest shapes:
+      - clip["social_media"] = "output/social/<clip>_social.json"  (string path)
+      - clip["social_media"] = {"copy_file": "..."}               (dict)
+    """
     sc = clip.get("social_media")
     if not sc:
         return {}
-    path = sc.get("copy_file") if isinstance(sc, dict) else None
+    if isinstance(sc, dict):
+        path = sc.get("copy_file")
+    elif isinstance(sc, str):
+        path = sc
+    else:
+        return {}
     if not path or not os.path.exists(path):
         return {}
     try:
