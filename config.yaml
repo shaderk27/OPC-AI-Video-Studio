@@ -80,6 +80,10 @@ clip_agent:
   transcript_boundary_max_extension: 2.0
   # Maximum score bonus when emotional language overlaps a strong audio peak
   emotion_audio_fusion_bonus: 15.0
+  # Final selection balances content relevance with engagement potential
+  topic_relevance_weight: 0.55
+  hook_score_weight: 0.45
+  topic_relevance_threshold: 60.0
   # Ensure clips start/end at silence boundaries for clean cuts
   snap_to_silence: true
 

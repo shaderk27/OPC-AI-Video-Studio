@@ -353,6 +353,10 @@ def save_manifest(pipeline_data: dict, results: dict, elapsed: float, config: di
             "detected_language": clip.get("detected_language", ""),
             "hook_score": clip.get("hook_score", 0),
             "hook_score_breakdown": clip.get("hook_score_breakdown", {}),
+            "topic_relevance": clip.get("topic_relevance", 0),
+            "matched_topic": clip.get("matched_topic", ""),
+            "is_topic_relevant": clip.get("is_topic_relevant", False),
+            "selection_score": clip.get("selection_score", 0),
         }
 
         if clip.get("subtitles"):

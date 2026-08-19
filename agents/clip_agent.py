@@ -59,6 +59,13 @@ class ClipAgent(BaseAgent):
         self.emotion_audio_fusion_bonus = self.clip_config.get(
             "emotion_audio_fusion_bonus", 15.0
         )
+        self.topic_relevance_weight = self.clip_config.get(
+            "topic_relevance_weight", 0.55
+        )
+        self.hook_score_weight = self.clip_config.get("hook_score_weight", 0.45)
+        self.topic_relevance_threshold = self.clip_config.get(
+            "topic_relevance_threshold", 60.0
+        )
         self.snap_to_silence = self.clip_config.get("snap_to_silence", True)
         self.whisper_model = config.get("subtitle_agent", {}).get("whisper_model", "base")
 
@@ -162,6 +169,12 @@ class ClipAgent(BaseAgent):
                 "fusion_bonus": hl.get("fusion_bonus", 0),
                 "hook_score": hl.get("hook_score", 0),
                 "hook_score_breakdown": hl.get("hook_score_breakdown", {}),
+                "topic_relevance": hl.get("topic_relevance", 0),
+                "topic_relevance_breakdown": hl.get(
+                    "topic_relevance_breakdown", {}
+                ),
+                "matched_topic": hl.get("matched_topic", ""),
+                "is_topic_relevant": hl.get("is_topic_relevant", False),
             })
 
         self.log(f"Created {len(clips)} clips from {video_name}")
@@ -179,6 +192,7 @@ class ClipAgent(BaseAgent):
         highlights = []
         input_data = input_data or {}
         content_analysis = input_data.get("content_analysis")
+        topics = content_analysis.get("topics", []) if content_analysis else []
         precomputed_segments = input_data.get("full_transcript", [])
         detected_lang = input_data.get("detected_language")
 
@@ -199,14 +213,21 @@ class ClipAgent(BaseAgent):
         # deduplicated, so corroborating signals reinforce rather than compete.
         highlights = self._fuse_emotion_and_energy(highlights)
         highlights = self._score_hooks(highlights)
+        highlights = self._score_topic_relevance(highlights, topics)
+        highlights = self._rank_candidates(highlights, has_topics=bool(topics))
 
         # Deduplicate overlapping highlights (keep highest scoring)
         highlights = self._deduplicate_highlights(highlights)
+        highlights = self._select_topic_diverse(highlights)
 
         if not highlights and self.strategy == "combined":
             # If combined found nothing, try energy-only as last resort
             highlights = self._find_energy_highlights(video_path, video_info)
+            highlights = self._score_hooks(highlights)
+            highlights = self._score_topic_relevance(highlights, topics)
+            highlights = self._rank_candidates(highlights, has_topics=bool(topics))
             highlights = self._deduplicate_highlights(highlights)
+            highlights = self._select_topic_diverse(highlights)
 
         return highlights
 
@@ -562,6 +583,135 @@ class ClipAgent(BaseAgent):
             hl["hook_score_breakdown"] = components
 
         return highlights
+
+    def _score_topic_relevance(self, highlights: List[Dict],
+                               topics: List[Dict]) -> List[Dict]:
+        """Score how strongly each candidate matches Content Analyzer topics."""
+        uninformative_terms = {
+            "he", "her", "hers", "him", "his", "i", "it", "its", "me",
+            "mine", "my", "our", "ours", "she", "their", "theirs", "them",
+            "they", "us", "we", "you", "your", "yours",
+        }
+        valid_topics = [
+            topic for topic in topics
+            if str(topic.get("term", "")).strip().lower() not in uninformative_terms
+        ]
+        max_frequency = max(
+            (float(topic.get("frequency", 0)) for topic in valid_topics),
+            default=0,
+        )
+
+        for hl in highlights:
+            text = (hl.get("text_preview") or hl.get("title") or "").strip()
+            best_score = 0.0
+            best_topic = ""
+            best_breakdown = {
+                "lexical_match": 0.0,
+                "time_overlap": 0.0,
+                "topic_prominence": 0.0,
+            }
+
+            for topic in valid_topics:
+                term = str(topic.get("term", "")).strip()
+                if not term:
+                    continue
+
+                if re.search(r"[\u4e00-\u9fff]", term):
+                    lexical_match = term in text
+                else:
+                    lexical_match = bool(re.search(
+                        rf"(?<!\w){re.escape(term)}(?!\w)", text,
+                        flags=re.IGNORECASE,
+                    ))
+
+                time_overlap = any(
+                    len(time_range) >= 2 and
+                    float(time_range[0]) < hl["end"] and
+                    float(time_range[1]) > hl["start"]
+                    for time_range in topic.get("time_ranges", [])
+                )
+                prominence = (
+                    float(topic.get("frequency", 0)) / max_frequency
+                    if max_frequency > 0 else 0
+                )
+                breakdown = {
+                    "lexical_match": 55.0 if lexical_match else 0.0,
+                    "time_overlap": 35.0 if time_overlap else 0.0,
+                    "topic_prominence": round(10.0 * prominence, 1),
+                }
+                score = min(100.0, sum(breakdown.values()))
+
+                if score > best_score:
+                    best_score = score
+                    best_topic = term
+                    best_breakdown = breakdown
+
+            hl["topic_relevance"] = round(best_score, 1)
+            hl["topic_relevance_breakdown"] = best_breakdown
+            hl["matched_topic"] = best_topic
+            hl["is_topic_relevant"] = best_score >= self.topic_relevance_threshold
+
+        return highlights
+
+    def _rank_candidates(self, highlights: List[Dict],
+                         has_topics: bool) -> List[Dict]:
+        """Combine topic relevance and hook potential into the final rank."""
+        total_weight = self.topic_relevance_weight + self.hook_score_weight
+        if total_weight <= 0:
+            topic_weight, hook_weight = 0.55, 0.45
+        else:
+            topic_weight = self.topic_relevance_weight / total_weight
+            hook_weight = self.hook_score_weight / total_weight
+
+        for hl in highlights:
+            hl["candidate_score"] = round(float(hl.get("score", 0)), 1)
+            if has_topics:
+                final_score = (
+                    float(hl.get("topic_relevance", 0)) * topic_weight +
+                    float(hl.get("hook_score", 0)) * hook_weight
+                )
+            else:
+                final_score = float(hl.get("hook_score", 0))
+            hl["score"] = round(min(100.0, max(0.0, final_score)), 1)
+            hl["final_selection_score"] = hl["score"]
+
+        return highlights
+
+    def _select_topic_diverse(self, highlights: List[Dict]) -> List[Dict]:
+        """Prefer relevant, distinct topics before weaker or repeated matches."""
+        ranked = sorted(highlights, key=lambda hl: hl["score"], reverse=True)
+        selected = []
+        seen_topics = set()
+
+        for hl in ranked:
+            topic = hl.get("matched_topic", "").lower()
+            if hl.get("is_topic_relevant") and topic and topic not in seen_topics:
+                selected.append(hl)
+                seen_topics.add(topic)
+                if len(selected) >= self.max_clips:
+                    return selected
+
+        # After topic coverage, keep other relevant clips ahead of candidates
+        # that only happen to overlap a topic's timestamp.
+        if len(selected) < self.max_clips:
+            selected_ids = {id(hl) for hl in selected}
+            for hl in ranked:
+                if id(hl) in selected_ids or not hl.get("is_topic_relevant"):
+                    continue
+                selected.append(hl)
+                if len(selected) >= self.max_clips:
+                    return selected
+
+        if len(selected) < self.max_clips:
+            selected_ids = {id(hl) for hl in selected}
+            for hl in ranked:
+                if id(hl) in selected_ids:
+                    continue
+                selected.append(hl)
+                if len(selected) >= self.max_clips:
+                    break
+
+        return selected
 
     def _fallback_even_clips(self, total_duration: float) -> List[Dict]:
         """If no highlights found, create evenly-spaced clips."""
