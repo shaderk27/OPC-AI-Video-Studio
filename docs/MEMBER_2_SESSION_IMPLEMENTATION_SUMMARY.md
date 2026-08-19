@@ -7,7 +7,7 @@ This session focused on the two Member 2 tracks:
 1. Improving highlight selection in the Clip Agent using Content Analyzer signals.
 2. Improving Social Media Agent output for Douyin and Xiaohongshu.
 
-It also added an approval gate immediately after clip creation so rejected clips do not go through subtitles, audio, thumbnails, formatting, social captions, or quality checks.
+It also added an approval gate immediately after clip creation so rejected clips do not go through subtitles, audio, thumbnails, formatting, social captions, or quality checks. Finally, it isolated every processing attempt in its own dated output folder so reruns do not overwrite one another.
 
 ## Implemented and committed
 
@@ -98,12 +98,28 @@ Commit: `18cb807 Add blocking clip review gate before downstream`
 - Recorded approval and rejection counts and decisions for auditing.
 - Added backend, API, and pipeline tests for partial approval and zero approval.
 
+### 8. Dated, isolated output folders for every run
+
+Commit: `11edec4 Isolate run outputs and persist review decisions`
+
+- Changed the configured `output` directory into an archive root containing one folder per processing run.
+- Added the folder convention `output/YYYY-MM-DD/HH-MM-SS_video-name_run-id/`.
+- Created separate `clips`, `subtitles`, `audio`, `thumbnails`, `social`, `formatted`, and `burned` subfolders inside every run.
+- Prevented an existing run folder from being silently reused or overwritten.
+- Preserved readable Chinese video names while removing unsafe path characters.
+- Applied the same folder behavior to web and command-line processing.
+- Added `run_id` and `output_dir` to generated manifests.
+- Saved clip approval results in `review_decisions.json` within the relevant run folder.
+- Updated download and static-media links to support nested run paths.
+- Added tests for dated paths, uniqueness, overwrite prevention, Chinese names, and review-decision persistence.
+
 ## Validation completed during the session
 
-- The focused Python test suite reached 27 passing tests after the approval-gate work.
+- The focused Python test suite reached 31 passing tests after the run-output organization work.
 - Python compilation checks passed.
 - JavaScript syntax validation passed for `web/app.js`.
 - Repository whitespace/diff validation passed for the implementation changes.
+- Every changed Python file passed compilation validation after the run-output organization work.
 - A saved football-match analysis was replayed through the scoring logic to inspect realistic results.
 
 ### Honest baseline results
@@ -171,10 +187,10 @@ Commit: `18cb807 Add blocking clip review gate before downstream`
 ## Known limitations and assumptions
 
 - The current Chinese caption implementation is deterministic and template-based; it is not yet driven by a generative model.
-- A full browser-based end-to-end pipeline run has not yet been completed for the new review gate.
+- A full browser-based end-to-end pipeline run has not yet been completed for the review gate and dated run folders.
 - Real Shenzhen travel footage and M5's final labelled test data were not available in this session, so those acceptance tests remain outstanding.
-- Rejected raw clip files remain in `output/clips`, but they do not receive further processing.
-- The unrelated local `.gitignore` modification was deliberately left untouched.
+- Rejected raw clip files remain in that run's `clips/` folder, but they do not receive further processing and are excluded from the final approved-clip manifest.
+- Existing files under the previous shared output folders are not migrated, moved, or deleted automatically.
 
 ## Recommended order for the remaining work
 
