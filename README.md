@@ -9,24 +9,25 @@ A multi-agent platform that turns long videos into short, engaging social media 
 Give it a 10+ minute raw video (travel vlog, lecture, match footage, etc.) and the studio will:
 
 1. **Analyze content** — transcribe the full video, detect topics, sentiment, chapters, and key moments
-2. **Find highlights** and cut them into 15-60s clips (using the content analysis for smarter selection)
-3. **Generate subtitles** in multiple languages
-4. **Translate audio** into multiple languages with AI voiceover
-5. **Create thumbnails** for each clip
-6. **Write social media copy** for TikTok, YouTube, Instagram, X
-7. **Format clips** for each platform (vertical, horizontal, square)
-8. **Review quality** and generate a report
+2. **Find highlights** and cut them into 15-60s clips (using topic relevance, emotion, audio energy, and hook scoring)
+3. **Pause for clip approval** so rejected candidates do not receive further processing
+4. **Generate subtitles** in multiple languages
+5. **Translate audio** into multiple languages with AI voiceover
+6. **Create thumbnails** for each clip
+7. **Write social media copy** for TikTok, YouTube, Instagram, X, Douyin, and Xiaohongshu
+8. **Format clips** for each platform (vertical, horizontal, square)
+9. **Review quality** and generate a report
 
 ## The AI Agent Team
 
 | Agent | Role | What It Does |
 |-------|------|-------------|
 | **Content Analyzer** | Video Content Intelligence Analyst | Pre-analyzes full video: transcribes, detects topics, sentiment, chapters, key moments, generates summary. Enriches all downstream agents. |
-| **Clip Expert** | Video Highlight Cutter | Uses content analysis + audio energy to find interesting moments, cuts them into short clips |
+| **Clip Expert** | Video Highlight Cutter | Uses topics, emotion, audio energy, hook scoring, and completion padding to select complete highlights |
 | **Subtitle Expert** | Multi-Language Subtitle Generator | Uses Whisper for speech-to-text, translates subtitles into any language |
 | **Audio Expert** | Audio Translation Specialist | Translates speech and generates AI voiceover in target languages, merges with video |
 | **Thumbnail Generator** | Thumbnail Creator | Extracts key frames and adds text overlays for eye-catching thumbnails |
-| **Social Media Copywriter** | Content Strategist | Writes platform-specific captions and hashtags |
+| **Social Media Copywriter** | Content Strategist | Writes platform-specific captions and hashtags, including distinct Douyin and Xiaohongshu styles |
 | **Format Adapter** | Multi-Platform Formatter | Resizes clips for TikTok (9:16), YouTube (16:9), Instagram (1:1). Platforms with the same dimensions share one render (TikTok/Shorts/Reels → single 1080x1920 file) |
 | **Quality Reviewer** | QA Specialist | Checks audio levels, subtitle sync, silence gaps, generates quality report |
 
@@ -50,7 +51,7 @@ The web UI wraps the whole pipeline — no CLI needed:
 
 - **Setup** — pick or upload a video, choose subtitle languages (separate subtitle files, burned directly into the video, or both), audio voiceover languages, and output formats (grouped by aspect ratio — TikTok/Shorts/Reels share one 1080×1920 render). Advanced options cover Whisper model size, clip count & durations, detection strategy, padding/snap-to-silence, TTS engine/speed/volumes, caption tone, thumbnails, quality checks, and per-agent toggles.
 - **Live progress** — real-time stage rail + log console (Server-Sent Events, with polling fallback).
-- **Review gate** — approve or drop each clip before it appears in the gallery; edit titles, captions and hashtags.
+- **Review gate** — immediately after Clip Expert, explicitly approve or drop every candidate. Only approved clips continue to subtitles, audio, thumbnails, social copy, formatting, and quality review.
 - **Gallery** — download clips, subtitles, translated audio, formatted platform versions, thumbnails and social copy.
 - **Demo Mode** — if the backend isn't running, the UI plays a simulated run so you can preview the workflow anytime.
 
@@ -76,24 +77,38 @@ python main.py input/travel_vlog.mp4 --languages en,zh,ja --max-clips 5
 
 # Skip certain stages
 python main.py input/lecture.mp4 --skip thumbnail,quality
+
+# Store the dated run folder under a different archive root
+python main.py input/travel_vlog.mp4 --output demo-output
 ```
 
 ### 4. Find Your Output
 
-All generated content goes to the `output/` directory:
+Every processing attempt receives its own folder. The default convention is
+`output/YYYY-MM-DD/HH-MM-SS_video-name_run-id/`, so processing the same video
+again does not overwrite earlier clips, reports, or captions. `--output`
+changes the archive root while preserving the dated run-folder structure.
 
 ```
 output/
-├── content_analysis.json  # Full content analysis (topics, sentiment, chapters, key moments)
-├── clips/              # Short highlight clips (MP4)
-├── subtitles/          # SRT, VTT, TXT files per language
-├── audio/              # Translated audio clips (MP4 + MP3 voiceover)
-├── thumbnails/         # Thumbnail images (PNG)
-├── social/             # Social media copy (JSON)
-├── formatted/          # Formatted clips (named by resolution, e.g. ..._1080x1920.mp4)
-├── manifest.json       # Master index of all generated content
-└── quality_report.json # Quality review report
+└── 2026-08-19/
+    └── 14-32-08_shenzhen-travel_a3f1b2c4/
+        ├── content_analysis.json  # Topics, sentiment, chapters, and key moments
+        ├── manifest.json          # Approved outputs and their paths
+        ├── quality_report.json    # Quality review results
+        ├── review_decisions.json  # Approved and rejected clip candidates
+        ├── clips/                 # Raw highlight candidates (MP4)
+        ├── subtitles/             # SRT, VTT, and TXT files per language
+        ├── audio/                 # Translated audio and voiceover files
+        ├── thumbnails/            # Thumbnail images (PNG)
+        ├── social/                # Platform captions and hashtags (JSON)
+        ├── formatted/             # Platform-specific video dimensions
+        └── burned/                # Videos with embedded subtitles
 ```
+
+Rejected raw candidates remain in that run's `clips/` folder for inspection,
+but they are excluded from `manifest.json` and do not receive downstream
+processing.
 
 ## Configuration
 
@@ -132,7 +147,9 @@ audio_agent:
 The Clip Expert uses multiple strategies to find interesting moments:
 
 - **Transcript analysis**: Searches for keywords, detects questions, exclamations, content density
-- **Audio energy**: Finds high-energy moments (cheers, laughter, emphasis)
+- **Content topics**: Scores candidates against Content Analyzer topics and promotes diverse relevant moments
+- **Emotion + audio energy**: Rewards moments where strong sentiment and audible energy occur together
+- **Hook score**: Ranks opening strength, emotion, audio energy, specificity, and coherence
 - **Silence detection**: Snaps clip boundaries to silence for clean cuts
 - **Combined** (default): Uses all strategies together
 
@@ -187,6 +204,11 @@ networks. The studio handles this automatically:
                     ┌────────▼────────┐
                     │  Clip Expert    │
                     │ (Find & Cut)    │
+                    └────────┬────────┘
+                             │
+                    ┌────────▼────────┐
+                    │ Human Approval │
+                    │ (Keep or Drop) │
                     └────────┬────────┘
                              │
                  ┌───────────┼───────────┐
