@@ -51,7 +51,7 @@ ACTIVE_RUN: Dict[str, bool] = {}
 def _new_run() -> Dict[str, Any]:
     return {
         "id": time.strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(2).hex(),
-        "status": "pending",          # pending | running | completed | failed
+        "status": "pending",          # pending | running | awaiting_review | completed | failed
         "queue": queue.Queue(),
         "stages": {},                 # stage -> {status, elapsed}
         "start_time": None,
@@ -60,6 +60,9 @@ def _new_run() -> Dict[str, Any]:
         "manifest": None,
         "quality": None,
         "decisions": {},              # index -> {decision, caption}
+        "review_clips": [],
+        "approved_indices": None,
+        "review_event": threading.Event(),
         "log": [],
     }
 
@@ -336,12 +339,40 @@ def _run_worker(run_id: str, req: WebRunRequest):
                 st.update(status="failed", elapsed=round(time.time() - start, 1))
                 _emit(run, "stage_failed", {"stage": stage, "ok": False, "error": message or "failed"})
 
+        def on_review(clips):
+            run["review_clips"] = clips
+            run["approved_indices"] = None
+            run["decisions"] = {
+                str(index): {"decision": "pending"}
+                for index in range(1, len(clips) + 1)
+            }
+            run["review_event"].clear()
+            run["status"] = "awaiting_review"
+            _emit(run, "review_ready", {
+                "count": len(clips),
+                "message": "Approve clips before downstream processing",
+            })
+            run["review_event"].wait()
+
+            approved_indices = run.get("approved_indices") or []
+            approved = [
+                clips[index - 1] for index in approved_indices
+                if 1 <= index <= len(clips)
+            ]
+            run["status"] = "running"
+            _emit(run, "review_completed", {
+                "approved": len(approved),
+                "rejected": len(clips) - len(approved),
+            })
+            return approved
+
         from main import run_studio
         run_studio(
             video_path=video_path,
             config=cfg,
             skip_stages=skip,
             on_stage=on_stage,
+            on_review=on_review,
         )
 
         # load manifest + quality FIRST (the burn pass reads the manifest)
@@ -523,7 +554,11 @@ def api_run_status(run_id: str):
         "elapsed": run["elapsed"],
         "video": os.path.basename(run["video"]) if run["video"] else "",
         "stages": run.get("stages", {}),
-        "clips_count": len((run.get("manifest") or {}).get("clips", [])),
+        "clips_count": len(
+            run.get("review_clips", [])
+            if run.get("status") == "awaiting_review"
+            else (run.get("manifest") or {}).get("clips", [])
+        ),
     }
 
 
@@ -545,10 +580,17 @@ def _social_copy_for(clip: dict) -> dict:
 @router.get("/api/runs/{run_id}/clips")
 def api_run_clips(run_id: str):
     run = RUNS.get(run_id)
-    if not run or not run["manifest"]:
-        raise HTTPException(404, "Run not finished or no manifest yet")
+    if not run:
+        raise HTTPException(404, "Run not found")
+    source_clips = (
+        run.get("review_clips", [])
+        if run.get("status") == "awaiting_review"
+        else (run.get("manifest") or {}).get("clips", [])
+    )
+    if not source_clips and run.get("status") not in ("awaiting_review", "completed"):
+        raise HTTPException(409, "Clips are not ready for review")
     items = []
-    for i, clip in enumerate(run["manifest"].get("clips", []), start=1):
+    for i, clip in enumerate(source_clips, start=1):
         social = _social_copy_for(clip)
         first_platform = (social.get("TikTok") or social.get("YouTube Shorts") or
                           social.get("Instagram Reels") or next(iter(social.values()), {}) or {})
@@ -576,6 +618,37 @@ def api_run_clips(run_id: str):
             "decision": decision.get("decision", "pending"),
         })
     return {"clips": items}
+
+
+@router.post("/api/runs/{run_id}/review")
+def api_continue_after_review(run_id: str, body: dict):
+    """Release the post-Clip gate with an explicit approved clip list."""
+    run = RUNS.get(run_id)
+    if not run:
+        raise HTTPException(404, "Run not found")
+    if run.get("status") != "awaiting_review":
+        raise HTTPException(409, "Run is not awaiting clip review")
+
+    clip_count = len(run.get("review_clips", []))
+    raw_indices = body.get("approved_indices", [])
+    if not isinstance(raw_indices, list) or any(
+            not isinstance(index, int) for index in raw_indices):
+        raise HTTPException(400, "approved_indices must be a list of integers")
+    approved_indices = sorted(set(raw_indices))
+    if any(index < 1 or index > clip_count for index in approved_indices):
+        raise HTTPException(400, "approved clip index is out of range")
+
+    run["approved_indices"] = approved_indices
+    for index in range(1, clip_count + 1):
+        run["decisions"].setdefault(str(index), {})["decision"] = (
+            "approved" if index in approved_indices else "dropped"
+        )
+    run["review_event"].set()
+    return {
+        "ok": True,
+        "approved_count": len(approved_indices),
+        "rejected_count": clip_count - len(approved_indices),
+    }
 
 
 @router.post("/api/runs/{run_id}/clips/{index}/decision")

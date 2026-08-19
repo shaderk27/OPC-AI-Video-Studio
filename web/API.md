@@ -123,7 +123,8 @@ Response: `{ "run_id": "20260818-1455-abc123" }` (server starts the pipeline in 
 | `stage_log` | `{stage, message}` (optional fine-grained lines) |
 | `stage_completed` | `{stage, ok: true, message}` |
 | `stage_failed` | `{stage, ok: false, error}` |
-| `clips_ready` | `{count}` (after clip stage) |
+| `review_ready` | `{count}` (pipeline pauses immediately after Clip Expert) |
+| `review_completed` | `{approved, rejected}` (downstream processing resumes) |
 | `run_completed` | `{run_id, elapsed, manifest, clips, quality}` |
 | `run_failed` | `{run_id, error}` |
 | `ping` | `{}` every 15 s (keep-alive) |
@@ -133,7 +134,7 @@ Frontend falls back to polling `GET /api/runs/{run_id}` every 2 s if SSE fails.
 ## 6. `GET /api/runs/{run_id}` — status snapshot (poll fallback)
 
 ```json
-{ "run_id": "...", "status": "running|completed|failed", "elapsed": 42.0,
+{ "run_id": "...", "status": "running|awaiting_review|completed|failed", "elapsed": 42.0,
   "stages": [ {"stage": "clip", "status": "active|done|failed|pending", "elapsed": 3.2} ],
   "clips_count": 5 }
 ```
@@ -150,7 +151,11 @@ Frontend falls back to polling `GET /api/runs/{run_id}` every 2 s if SSE fails.
 ```
 
 - `POST /api/runs/{run_id}/clips/{index}/decision` body `{"decision": "approved"|"dropped"}` → `{ok: true}`
-- `POST /api/runs/{run_id}/clips/{index}/caption` body `{"caption": "..."}` → `{ok: true}`
+- `POST /api/runs/{run_id}/review` body `{"approved_indices": [1,3]}` resumes the pipeline with only those clips.
+
+The review gate occurs immediately after Clip Expert. Subtitle, audio,
+thumbnail, social-media, format, and quality agents do not run until this
+endpoint is called. An empty list ends the run without downstream processing.
 
 ## 8. Results
 

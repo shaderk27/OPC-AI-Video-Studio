@@ -258,8 +258,8 @@ manager_agent:
   stage_timeout: 300
   # Pause after Clip stage for human review of generated clips
   review_gate_enabled: true
-  # Auto-approve all clips after this many seconds (prevents demo deadlock)
-  review_gate_timeout: 300
+  # Seconds before auto-approval. 0 means wait for an explicit human decision.
+  review_gate_timeout: 0
   # Core stages — failure here stops the entire pipeline
   core_stages:
     - "content_analysis"

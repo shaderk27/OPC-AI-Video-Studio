@@ -167,6 +167,12 @@ class ManagerAgent(BaseAgent):
                 # Check if we should pause for human review
                 if self.review_gate_enabled and pipeline_data.get("clips"):
                     self._pause_for_review(pipeline_data)
+                    if not pipeline_data.get("clips"):
+                        self._emit("pipeline_stopped", {
+                            "reason": "No clips were approved",
+                            "stage": "review",
+                        })
+                        break
                 continue
 
             # All other stages: run with retry
@@ -389,7 +395,11 @@ class ManagerAgent(BaseAgent):
 
         # Wait for approval (with timeout to prevent deadlock)
         self.review_gate.clear()
-        approved = self.review_gate.wait(timeout=self.review_gate_timeout)
+        if self.review_gate_timeout > 0:
+            approved = self.review_gate.wait(timeout=self.review_gate_timeout)
+        else:
+            self.review_gate.wait()
+            approved = True
 
         if not approved:
             # Timeout — auto-approve all clips

@@ -110,12 +110,14 @@ def get_agent_role(stage: str) -> str:
 
 def run_studio(video_path: str, config: dict, skip_stages: list = None,
                override_languages: str = None, override_max_clips: int = None,
-               on_stage: callable = None):
+               on_stage: callable = None, on_review: callable = None):
     """Run the full AI Video Studio pipeline.
 
     on_stage: optional callback(stage, status, message) invoked with
               status in ("started", "completed", "failed"). Used by the
               web backend (api/server.py) to stream live progress.
+    on_review: optional callback(clips) invoked immediately after Clip Expert.
+               It must return only the clips approved for downstream agents.
     """
 
     skip_stages = skip_stages or []
@@ -230,6 +232,22 @@ def run_studio(video_path: str, config: dict, skip_stages: list = None,
                 if stage == "clip":
                     summary = {"clips": len(result.get("clips", []))}
                 on_stage(stage, "completed", summary)
+
+            if stage == "clip" and on_review:
+                approved_clips = on_review(list(pipeline_data.get("clips", [])))
+                pipeline_data["clips"] = list(approved_clips or [])
+                pipeline_data["review"] = {
+                    "generated_count": len(result.get("clips", [])),
+                    "approved_count": len(pipeline_data["clips"]),
+                    "rejected_count": (
+                        len(result.get("clips", [])) - len(pipeline_data["clips"])
+                    ),
+                }
+                if not pipeline_data["clips"]:
+                    console.print(
+                        "[yellow]No clips approved. Skipping all downstream stages.[/yellow]"
+                    )
+                    break
 
         except Exception as e:
             console.print(f"[red]Stage '{escape(stage)}' failed: {escape(str(e))}[/red]")

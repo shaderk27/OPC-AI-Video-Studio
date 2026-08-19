@@ -38,6 +38,7 @@ const state = {
   runId: null,
   run: { status: "idle", stages: {}, elapsed: 0, video: "" },
   review: [],
+  reviewActive: false,
   manifest: null,
   quality: null,
   downloads: null,
@@ -453,6 +454,7 @@ async function startRun() {
 function resetRunState() {
   state.run = { status: "running", stages: {}, elapsed: 0, video: "" };
   state.review = [];
+  state.reviewActive = false;
   state.manifest = state.quality = state.downloads = null;
   state.runStartTs = Date.now();
   $("#stage-rail").innerHTML = "";
@@ -497,7 +499,7 @@ function setStage(id, status, extra = "") {
 /* ───────────────────────── SSE + polling ───────────────────────── */
 function connectSSE(runId) {
   const es = new EventSource(`/api/runs/${runId}/events`);
-  const names = ["run_started", "stage_started", "stage_log", "stage_completed", "stage_failed", "run_completed", "run_failed", "ping"];
+  const names = ["run_started", "stage_started", "stage_log", "stage_completed", "stage_failed", "review_ready", "review_completed", "run_completed", "run_failed", "ping"];
   names.forEach((n) => es.addEventListener(n, (ev) => {
     let d = {};
     try { d = JSON.parse(ev.data); } catch (e) {}
@@ -513,6 +515,7 @@ function startPolling(runId) {
       const snap = await api(`/api/runs/${runId}`);
       if (snap.status === "completed") { clearInterval(state.pollTimer); handleRunCompleted(); }
       else if (snap.status === "failed") { clearInterval(state.pollTimer); handleRunFailed("pipeline failed (see log)"); }
+      else if (snap.status === "awaiting_review" && !state.reviewActive) { handleReviewReady(); }
       else {
         Object.entries(snap.stages || {}).forEach(([id, st]) => {
           if (st.status !== "pending") setStage(id, st.status);
@@ -543,6 +546,15 @@ function logRun(event, d) {
     case "stage_failed":
       setStage(d.stage, "failed");
       log(`✗ ${d.stage} failed: ${d.error || ""}`, "err", d.stage);
+      break;
+    case "review_ready":
+      log(`${d.count || 0} clips ready — waiting for your approval.`, "info", "clip");
+      handleReviewReady();
+      break;
+    case "review_completed":
+      log(`Review complete — ${d.approved || 0} approved, ${d.rejected || 0} dropped.`, "ok");
+      state.reviewActive = false;
+      showView("progress");
       break;
     case "run_completed":
       log(`Run completed in ${fmtTime(d.elapsed)} — ${d.clips || 0} clips.`, "ok");
@@ -641,6 +653,10 @@ function makeDemoResults(payload) {
 /* ───────────────────────── completed → review ───────────────────────── */
 async function handleRunCompleted() {
   if (state.pollTimer) clearInterval(state.pollTimer);
+  if (!state.demo && state.review.length > 0) {
+    await showGallery();
+    return;
+  }
   enableStep("review", true);
   if (state.demo) { await loadReviewDemo(); }
   else {
@@ -652,6 +668,21 @@ async function handleRunCompleted() {
   }
   renderReview();
   showView("review");
+}
+
+async function handleReviewReady() {
+  if (state.reviewActive) return;
+  state.reviewActive = true;
+  enableStep("review", true);
+  try {
+    const { clips } = await api(`/api/runs/${state.runId}/clips`);
+    state.review = clips;
+    renderReview();
+    showView("review");
+  } catch (e) {
+    state.reviewActive = false;
+    log("Could not load clips for review: " + e.message, "err");
+  }
 }
 
 async function loadReviewDemo() {
@@ -685,16 +716,12 @@ function renderReview() {
         <span class="rc-badge">${clip.index} · ${fmtTime(clip.duration)}</span>${hook}
       </div>
       <div class="rc-body">
-        <div class="rc-title"><input value="${esc(clip.title)}" data-role="title" spellcheck="false"></div>
+        <div class="rc-title">${esc(clip.title)}</div>
         <div class="rc-meta">
           <span>subs: ${esc((clip.subtitle_langs || []).join(", ") || "—")}</span>
           <span>${fmtTime(clip.start)} → ${fmtTime(clip.end)}</span>
         </div>
         <div class="rc-reason">${esc(clip.reason || "")}</div>
-        <div class="rc-caption">
-          <textarea data-role="caption" placeholder="Caption…">${esc(clip.caption || "")}</textarea>
-          <input data-role="hashtags" value="${esc((clip.hashtags || []).join(" "))}" placeholder="#hashtags" spellcheck="false">
-        </div>
       </div>
       <div class="rc-actions">
         <button class="btn btn-approve ${clip.decision === "approved" ? "on" : ""}" data-act="approve">✓ Approve</button>
@@ -702,17 +729,12 @@ function renderReview() {
       </div>`;
     card.querySelector('[data-act="approve"]').addEventListener("click", () => setDecision(clip.index, "approved"));
     card.querySelector('[data-act="drop"]').addEventListener("click", () => setDecision(clip.index, "dropped"));
-    card.querySelector('[data-role="title"]').addEventListener("input", (e) => { clip.title = e.target.value; });
-    card.querySelector('[data-role="caption"]').addEventListener("change", (e) => saveCaption(clip.index, e.target.value, null));
-    card.querySelector('[data-role="hashtags"]').addEventListener("change", (e) => {
-      saveCaption(clip.index, null, e.target.value.split(/\s+/).filter(Boolean));
-    });
     grid.appendChild(card);
   });
 
   const anyPending = state.review.some((c) => c.decision === "pending");
-  $("#review-next").disabled = false;
-  $("#review-next").textContent = anyPending ? "Continue to gallery (pending = approved)" : "Continue to gallery →";
+  $("#review-next").disabled = anyPending;
+  $("#review-next").textContent = anyPending ? "Review every clip to continue" : "Continue processing →";
 }
 
 async function setDecision(index, decision) {
@@ -743,7 +765,25 @@ function saveCaption(index, caption, hashtags) {
 
 $("#review-approve-all").addEventListener("click", () => state.review.forEach((c) => setDecision(c.index, "approved")));
 $("#review-drop-all").addEventListener("click", () => state.review.forEach((c) => setDecision(c.index, "dropped")));
-$("#review-next").addEventListener("click", () => showGallery());
+$("#review-next").addEventListener("click", async () => {
+  if (state.demo) { showGallery(); return; }
+  const approvedIndices = state.review
+    .filter((clip) => clip.decision === "approved")
+    .map((clip) => clip.index);
+  $("#review-next").disabled = true;
+  try {
+    await api(`/api/runs/${state.runId}/review`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved_indices: approvedIndices }),
+    });
+    state.reviewActive = false;
+    showView("progress");
+  } catch (e) {
+    $("#review-next").disabled = false;
+    log("Could not continue after review: " + e.message, "err");
+  }
+});
 
 /* ───────────────────────── gallery ───────────────────────── */
 async function showGallery() {
@@ -766,7 +806,9 @@ function renderGallery() {
   const m = state.manifest || { clips: [], content_analysis: {} };
   const q = state.quality || {};
   const approved = state.review.filter((c) => c.decision !== "dropped").map((c) => c.index);
-  const clips = (m.clips || []).filter((_, i) => approved.includes(i + 1));
+  const clips = state.demo
+    ? (m.clips || []).filter((_, i) => approved.includes(i + 1))
+    : (m.clips || []);
   const ca = m.content_analysis || {};
 
   $("#gallery-subtitle").textContent = m.video ? `Video: ${m.video} · processed in ${fmtTime(m.processing_time_seconds || 0)}` : "";
