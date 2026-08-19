@@ -171,6 +171,12 @@ social_media_agent:
     - name: "X (Twitter)"
       max_caption_length: 280
       hashtag_count: 3
+    - name: "Douyin"
+      max_caption_length: 150
+      hashtag_count: 5
+    - name: "Xiaohongshu"
+      max_caption_length: 1000
+      hashtag_count: 8
   # Tone: casual, professional, energetic, educational
   tone: "energetic"
 
