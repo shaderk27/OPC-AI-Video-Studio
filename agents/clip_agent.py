@@ -49,6 +49,12 @@ class ClipAgent(BaseAgent):
         self.keywords = self.clip_config.get("highlight_keywords", [])
         self.padding_before = self.clip_config.get("padding_before", 1.5)
         self.padding_after = self.clip_config.get("padding_after", 1.0)
+        self.completion_padding_after = self.clip_config.get(
+            "completion_padding_after", 6.0
+        )
+        self.transcript_boundary_max_extension = self.clip_config.get(
+            "transcript_boundary_max_extension", 2.0
+        )
         self.snap_to_silence = self.clip_config.get("snap_to_silence", True)
         self.whisper_model = config.get("subtitle_agent", {}).get("whisper_model", "base")
 
@@ -100,12 +106,20 @@ class ClipAgent(BaseAgent):
             self.log("No highlights detected. Creating evenly-spaced clips as fallback.")
             highlights = self._fallback_even_clips(total_duration)
 
-        # Step 3: Snap to silence boundaries if enabled
+        # Step 3: Protect the payoff/reaction after each detected moment.
+        highlights = self._extend_for_completion(
+            highlights, total_duration, precomputed_segments
+        )
+
+        # Step 4: Snap to silence boundaries if enabled
         if self.snap_to_silence and video_info["has_audio"]:
             self.log("Snapping clip boundaries to silence...")
             highlights = self._snap_to_silence(video_path, highlights)
 
-        # Step 4: Cut the clips
+        # Step 5: Apply output padding once, while enforcing duration limits.
+        highlights = self._finalize_clip_boundaries(highlights, total_duration)
+
+        # Step 6: Cut the clips
         clips_dir = self.paths.get("clips_dir", "output/clips")
         self.ensure_dir(clips_dir)
         clips = []
@@ -122,8 +136,8 @@ class ClipAgent(BaseAgent):
                 start_time=hl["start"],
                 end_time=hl["end"],
                 output_path=clip_path,
-                padding_before=self.padding_before,
-                padding_after=self.padding_after,
+                padding_before=0,
+                padding_after=0,
             )
 
             actual_duration = hl["end"] - hl["start"]
@@ -408,8 +422,70 @@ class ClipAgent(BaseAgent):
 
         return highlights
 
+    def _extend_for_completion(self, highlights: List[Dict],
+                               total_duration: float,
+                               transcript_segments: List[Dict] = None) -> List[Dict]:
+        """Reserve time after a highlight for its payoff and reaction.
+
+        When the target endpoint falls inside a transcript segment, extend to
+        the end of that segment so commentary is not cut mid-sentence. If the
+        result exceeds the maximum duration, move the start forward rather than
+        removing the protected ending.
+        """
+        transcript_segments = sorted(
+            transcript_segments or [], key=lambda seg: seg.get("start", 0)
+        )
+
+        for hl in highlights:
+            if hl.get("reason") == "evenly spaced fallback":
+                continue
+
+            desired_end = min(
+                total_duration, hl["end"] + self.completion_padding_after
+            )
+
+            for seg in transcript_segments:
+                seg_start = seg.get("start", 0)
+                seg_end = seg.get("end", seg_start)
+                if seg_start <= desired_end < seg_end:
+                    if (seg_end - desired_end <=
+                            self.transcript_boundary_max_extension):
+                        desired_end = min(total_duration, seg_end)
+                    break
+
+            hl["end"] = desired_end
+            if hl["end"] - hl["start"] > self.max_duration:
+                hl["start"] = max(0, hl["end"] - self.max_duration)
+
+        return highlights
+
+    def _finalize_clip_boundaries(self, highlights: List[Dict],
+                                  total_duration: float) -> List[Dict]:
+        """Apply configured padding and keep final metadata within limits."""
+        for hl in highlights:
+            start = max(0, hl["start"] - self.padding_before)
+            end = min(total_duration, hl["end"] + self.padding_after)
+
+            # Preserve the protected payoff when padding pushes past the limit.
+            if end - start > self.max_duration:
+                start = max(0, end - self.max_duration)
+
+            # Near the end of a source video, recover minimum duration from the
+            # beginning side when enough source material is available.
+            if end - start < self.min_duration:
+                start = max(0, end - self.min_duration)
+
+            hl["start"] = start
+            hl["end"] = end
+
+        return highlights
+
     def _snap_to_silence(self, video_path: str, highlights: List[Dict]) -> List[Dict]:
-        """Adjust highlight boundaries to nearby silence for clean cuts."""
+        """Expand highlight boundaries to nearby silence for clean cuts.
+
+        Starts may only move backward and ends may only move forward. This
+        prevents silence snapping from removing either buildup or payoff.
+        """
         try:
             silences = detect_silence(video_path, min_silence_duration=0.3)
         except Exception:
@@ -424,7 +500,9 @@ class ClipAgent(BaseAgent):
             best_dist = float("inf")
             for s_start, s_end in silences:
                 dist = abs(s_end - hl["start"])
-                if dist < best_dist and dist < 2.0 and s_end < hl["end"]:
+                if (dist < best_dist and dist < 2.0 and
+                        s_end <= hl["start"] and
+                        hl["end"] - s_end <= self.max_duration):
                     best_dist = dist
                     best_start = s_end
             hl["start"] = best_start
@@ -434,7 +512,9 @@ class ClipAgent(BaseAgent):
             best_dist = float("inf")
             for s_start, s_end in silences:
                 dist = abs(s_start - hl["end"])
-                if dist < best_dist and dist < 2.0 and s_start > hl["start"]:
+                if (dist < best_dist and dist < 2.0 and
+                        s_start >= hl["end"] and
+                        s_start - hl["start"] <= self.max_duration):
                     best_dist = dist
                     best_end = s_start
             hl["end"] = best_end

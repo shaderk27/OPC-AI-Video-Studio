@@ -72,6 +72,12 @@ clip_agent:
   # Add padding (seconds) before and after detected highlights
   padding_before: 1.5
   padding_after: 1.0
+  # Reserve time after a detected moment for its payoff and reaction
+  # (for example: penalty buildup -> shot -> result/celebration)
+  completion_padding_after: 6.0
+  # Finish a nearby transcript sentence, but do not follow an unusually long
+  # Whisper segment far beyond the protected payoff window
+  transcript_boundary_max_extension: 2.0
   # Ensure clips start/end at silence boundaries for clean cuts
   snap_to_silence: true
 
