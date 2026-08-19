@@ -15,6 +15,8 @@ project:
 # Paths
 # ─────────────────────────────────────────────────────────────────────────────
 paths:
+  # Each processing run creates YYYY-MM-DD/HH-MM-SS_video-name_run-id
+  # beneath this archive root. The remaining paths are runtime defaults.
   input_dir: "input"
   output_dir: "output"
   clips_dir: "output/clips"

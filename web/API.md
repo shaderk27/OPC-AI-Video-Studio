@@ -156,20 +156,25 @@ Frontend falls back to polling `GET /api/runs/{run_id}` every 2 s if SSE fails.
 The review gate occurs immediately after Clip Expert. Subtitle, audio,
 thumbnail, social-media, format, and quality agents do not run until this
 endpoint is called. An empty list ends the run without downstream processing.
+The final decisions are saved as `review_decisions.json` in that run's folder.
 
 ## 8. Results
 
-- `GET /api/runs/{run_id}/manifest` → the pipeline `output/manifest.json` content
-- `GET /api/runs/{run_id}/quality` → `output/quality_report.json` content
+- `GET /api/runs/{run_id}/manifest` → that run's `manifest.json` content
+- `GET /api/runs/{run_id}/quality` → that run's `quality_report.json` content
 - `GET /api/runs/{run_id}/downloads` → list of ready-to-download artifacts
 
+Every processing attempt is isolated under
+`output/YYYY-MM-DD/HH-MM-SS_video-name_run-id/`. Reprocessing a video therefore
+does not overwrite an earlier manifest, report, clip, or caption.
+
 ```json
-{ "clips": [{"filename": "...", "url": "/output/clips/...mp4"}],
-  "subtitles": [{"filename": "...", "url": "/output/subtitles/...srt", "lang": "zh"}],
-  "formatted": [{"platform": "TikTok", "url": "/output/formatted/..._1080x1920.mp4"}],
-  "burned": [{"lang": "en", "url": "/output/burned/...mp4"}],
-  "thumbnails": ["/output/thumbnails/...png"],
-  "social": ["/output/social/...json"] }
+{ "clips": [{"filename": "...", "url": "/output/2026-08-19/14-32-08_video_a3f1/clips/...mp4"}],
+  "subtitles": [{"filename": "...", "url": "/output/2026-08-19/14-32-08_video_a3f1/subtitles/...srt", "lang": "zh"}],
+  "formatted": [{"platform": "TikTok", "url": "/output/2026-08-19/14-32-08_video_a3f1/formatted/..._1080x1920.mp4"}],
+  "burned": [{"lang": "en", "url": "/output/2026-08-19/14-32-08_video_a3f1/burned/...mp4"}],
+  "thumbnails": ["/output/2026-08-19/14-32-08_video_a3f1/thumbnails/...png"],
+  "social": ["/output/2026-08-19/14-32-08_video_a3f1/social/...json"] }
 ```
 
 ## Notes for M1

@@ -71,7 +71,7 @@ app.add_middleware(
 # Project root
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 INPUT_DIR = PROJECT_ROOT / "input"
-OUTPUT_DIR = PROJECT_ROOT / "output"
+OUTPUT_DIR = Path(os.environ.get("OPC_OUTPUT_DIR", str(PROJECT_ROOT / "output")))
 INPUT_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -417,12 +417,21 @@ async def export_run(run_id: str):
             detail=f"Run not complete (status: {status['status'] if status else 'unknown'})",
         )
 
+    manifest_path = Path(manifest.get("manifest_path", "manifest.json"))
+    try:
+        manifest_url = (
+            "/output/"
+            + manifest_path.resolve().relative_to(OUTPUT_DIR.resolve()).as_posix()
+        )
+    except ValueError:
+        manifest_url = ""
+
     return ExportResponse(
         run_id=run_id,
-        manifest_path=manifest.get("manifest_path", ""),
+        manifest_path=str(manifest_path),
         clips_count=manifest.get("clips", []).__len__(),
-        output_dir=str(OUTPUT_DIR),
-        download_url=f"/output/manifest.json",
+        output_dir=manifest.get("output_dir", str(OUTPUT_DIR)),
+        download_url=manifest_url,
     )
 
 

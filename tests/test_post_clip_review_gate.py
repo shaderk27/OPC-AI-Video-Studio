@@ -1,4 +1,7 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import main
@@ -68,27 +71,45 @@ class ReviewGateApiTests(unittest.TestCase):
         RUNS.pop("review-test", None)
 
     def test_review_submission_records_decisions_and_releases_worker(self):
-        run = _new_run()
-        run["status"] = "awaiting_review"
-        run["review_clips"] = [{"id": 1}, {"id": 2}, {"id": 3}]
-        run["decisions"] = {
-            "1": {"decision": "pending"},
-            "2": {"decision": "pending"},
-            "3": {"decision": "pending"},
-        }
-        RUNS["review-test"] = run
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run = _new_run()
+            run["id"] = "review-test"
+            run["status"] = "awaiting_review"
+            run["output_dir"] = temp_dir
+            run["review_clips"] = [
+                {"id": 1, "filename": "one.mp4"},
+                {"id": 2, "filename": "two.mp4"},
+                {"id": 3, "filename": "three.mp4"},
+            ]
+            run["decisions"] = {
+                "1": {"decision": "pending"},
+                "2": {"decision": "pending"},
+                "3": {"decision": "pending"},
+            }
+            RUNS["review-test"] = run
 
-        response = api_continue_after_review(
-            "review-test", {"approved_indices": [1, 3]}
-        )
+            response = api_continue_after_review(
+                "review-test", {"approved_indices": [1, 3]}
+            )
 
-        self.assertEqual(response["approved_count"], 2)
-        self.assertEqual(response["rejected_count"], 1)
-        self.assertEqual(run["approved_indices"], [1, 3])
-        self.assertEqual(run["decisions"]["1"]["decision"], "approved")
-        self.assertEqual(run["decisions"]["2"]["decision"], "dropped")
-        self.assertEqual(run["decisions"]["3"]["decision"], "approved")
-        self.assertTrue(run["review_event"].is_set())
+            self.assertEqual(response["approved_count"], 2)
+            self.assertEqual(response["rejected_count"], 1)
+            self.assertEqual(run["approved_indices"], [1, 3])
+            self.assertEqual(run["decisions"]["1"]["decision"], "approved")
+            self.assertEqual(run["decisions"]["2"]["decision"], "dropped")
+            self.assertEqual(run["decisions"]["3"]["decision"], "approved")
+            self.assertTrue(run["review_event"].is_set())
+
+            with open(
+                Path(temp_dir) / "review_decisions.json", encoding="utf-8"
+            ) as file:
+                audit = json.load(file)
+            self.assertEqual(audit["approved_count"], 2)
+            self.assertEqual(audit["rejected_count"], 1)
+            self.assertEqual(
+                [clip["decision"] for clip in audit["clips"]],
+                ["approved", "dropped", "approved"],
+            )
 
 
 if __name__ == "__main__":

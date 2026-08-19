@@ -500,6 +500,7 @@ class ManagerAgent(BaseAgent):
         manifest = {
             "project": "OPC AI Video Studio",
             "run_id": self.run_id,
+            "output_dir": config.get("paths", {}).get("output_dir", "output"),
             "video": pipeline_data.get("video_name", ""),
             "video_path": pipeline_data.get("video_path", ""),
             "processing_time_seconds": round(elapsed, 1),

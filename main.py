@@ -20,7 +20,7 @@ Usage:
         --languages <codes>  Comma-separated target language codes (e.g., en,zh,es)
         --max-clips <n>      Maximum number of clips to generate
         --skip <stages>      Comma-separated stages to skip (e.g., thumbnail,quality)
-        --output <dir>       Output directory (default: output/)
+        --output <dir>       Output archive root (default: output/)
 
 Example:
     python main.py input/my_video.mp4 --languages en,zh,ja --max-clips 5
@@ -32,6 +32,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import yaml
@@ -40,6 +41,8 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+
+from utils.run_paths import prepare_run_output
 
 
 def _make_console() -> Console:
@@ -333,6 +336,8 @@ def save_manifest(pipeline_data: dict, results: dict, elapsed: float, config: di
     """Save a manifest file with all generated content paths."""
     manifest = {
         "project": "OPC AI Video Studio",
+        "run_id": config.get("run", {}).get("id", ""),
+        "output_dir": config.get("paths", {}).get("output_dir", "output"),
         "video": pipeline_data.get("video_name", ""),
         "video_path": pipeline_data.get("video_path", ""),
         "processing_time_seconds": round(elapsed, 1),
@@ -438,7 +443,7 @@ Examples:
     parser.add_argument("--languages", help="Comma-separated target languages (e.g., en,zh,es)")
     parser.add_argument("--max-clips", type=int, help="Maximum number of clips to generate")
     parser.add_argument("--skip", help="Comma-separated stages to skip")
-    parser.add_argument("--output", help="Output directory override")
+    parser.add_argument("--output", help="Output archive root override")
 
     args = parser.parse_args()
 
@@ -452,6 +457,16 @@ Examples:
     # Apply output override
     if args.output:
         config.setdefault("paths", {})["output_dir"] = args.output
+
+    if not os.path.exists(args.video_path):
+        parser.error(f"Video file not found: {args.video_path}")
+
+    config, run_dir = prepare_run_output(
+        config,
+        args.video_path,
+        uuid.uuid4().hex[:8],
+    )
+    console.print(f"[bold]Run output:[/bold] {escape(str(run_dir))}")
 
     # Parse skip stages
     skip_stages = args.skip.split(",") if args.skip else []

@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 from agents.manager_agent import ManagerAgent
+from utils.run_paths import prepare_run_output
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -49,6 +50,7 @@ class RunState:
         self.manifest: Optional[Dict] = None
         self.pipeline_data: Optional[Dict] = None
         self.elapsed: Optional[float] = None
+        self.output_dir: str = config.get("paths", {}).get("output_dir", "output")
 
         # Timing
         self.created_at: str = datetime.now().isoformat()
@@ -84,6 +86,12 @@ class PipelineRunner:
     ) -> str:
         """Start a new pipeline run in a background thread. Returns run_id."""
         run_id = str(uuid.uuid4())[:8]
+        config, _ = prepare_run_output(
+            config,
+            video_path,
+            run_id,
+            datetime.now().astimezone(),
+        )
 
         with self._lock:
             state = RunState(run_id, video_path, video_name, config, skip_stages)
@@ -275,11 +283,18 @@ class PipelineRunner:
 
         # Determine which clips to approve
         if approve_all:
-            approved_clips = clips
+            approved_index_set = set(range(len(clips)))
         elif approved_indices is not None:
-            approved_clips = [clips[i] for i in approved_indices if i < len(clips)]
+            approved_index_set = {
+                index for index in approved_indices
+                if 0 <= index < len(clips)
+            }
         else:
-            approved_clips = clips  # default: approve all
+            approved_index_set = set(range(len(clips)))
+        approved_clips = [
+            clip for index, clip in enumerate(clips)
+            if index in approved_index_set
+        ]
 
         # Apply edits if provided
         if edits:
@@ -292,6 +307,30 @@ class PipelineRunner:
                         approved_clips[idx]["start"] = edit["start"]
                     if "end" in edit:
                         approved_clips[idx]["end"] = edit["end"]
+
+        review_payload = {
+            "run_id": run_id,
+            "video": state.video_name,
+            "submitted_at": datetime.now().astimezone().isoformat(),
+            "approved_count": len(approved_clips),
+            "rejected_count": len(clips) - len(approved_clips),
+            "clips": [
+                {
+                    "index": index,
+                    "filename": clip.get("filename", ""),
+                    "title": clip.get("title", ""),
+                    "start": clip.get("start", 0),
+                    "end": clip.get("end", 0),
+                    "decision": (
+                        "approved" if index in approved_index_set else "dropped"
+                    ),
+                }
+                for index, clip in enumerate(clips)
+            ],
+        }
+        decision_path = Path(state.output_dir) / "review_decisions.json"
+        with open(decision_path, "w", encoding="utf-8") as file:
+            json.dump(review_payload, file, indent=2, ensure_ascii=False)
 
         # Set the approved clips on the manager and release the gate
         if state._manager:

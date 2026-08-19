@@ -23,6 +23,7 @@ import subprocess
 import threading
 import time
 import traceback
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -30,6 +31,8 @@ import yaml
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
+from utils.run_paths import prepare_run_output
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = BASE_DIR / "config.yaml"
@@ -62,6 +65,7 @@ def _new_run() -> Dict[str, Any]:
         "decisions": {},              # index -> {decision, caption}
         "review_clips": [],
         "approved_indices": None,
+        "output_dir": "",
         "review_event": threading.Event(),
         "log": [],
     }
@@ -70,6 +74,43 @@ def _new_run() -> Dict[str, Any]:
 def _emit(run: Dict[str, Any], event: str, data: Any):
     run["queue"].put({"event": event, "data": data})
     run["log"].append((event, data))
+
+
+def _save_review_decisions(run: Dict[str, Any]) -> Optional[Path]:
+    """Persist the post-Clip approval audit inside this run's folder."""
+    output_dir = run.get("output_dir")
+    if not output_dir:
+        return None
+
+    clips = []
+    for index, clip in enumerate(run.get("review_clips", []), 1):
+        review = run.get("decisions", {}).get(str(index), {})
+        clips.append({
+            "index": index,
+            "filename": clip.get("filename", ""),
+            "title": clip.get("title", ""),
+            "start": clip.get("start", 0),
+            "end": clip.get("end", 0),
+            "decision": review.get("decision", "pending"),
+            "caption": review.get("caption", ""),
+            "hashtags": review.get("hashtags", []),
+        })
+
+    approved_count = sum(
+        item["decision"] == "approved" for item in clips
+    )
+    payload = {
+        "run_id": run.get("id", ""),
+        "video": run.get("video", ""),
+        "submitted_at": datetime.now().astimezone().isoformat(),
+        "approved_count": approved_count,
+        "rejected_count": len(clips) - approved_count,
+        "clips": clips,
+    }
+    decision_path = Path(output_dir) / "review_decisions.json"
+    with open(decision_path, "w", encoding="utf-8") as file:
+        json.dump(payload, file, indent=2, ensure_ascii=False)
+    return decision_path
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +355,13 @@ def _run_worker(run_id: str, req: WebRunRequest):
         run["video"] = video_path
 
         skip = _apply_overrides(cfg, req, run)
+        cfg, run_dir = prepare_run_output(
+            cfg,
+            video_path,
+            run_id,
+            datetime.fromtimestamp(start).astimezone(),
+        )
+        run["output_dir"] = str(run_dir)
         run["stages"] = {s: {"status": "pending", "elapsed": 0.0} for s in run["active_stages"]}
 
         _emit(run, "run_started", {
@@ -643,6 +691,7 @@ def api_continue_after_review(run_id: str, body: dict):
         run["decisions"].setdefault(str(index), {})["decision"] = (
             "approved" if index in approved_indices else "dropped"
         )
+    _save_review_decisions(run)
     run["review_event"].set()
     return {
         "ok": True,
@@ -694,9 +743,14 @@ def api_run_downloads(run_id: str):
     run = RUNS.get(run_id)
     if not run or not run["manifest"]:
         raise HTTPException(404, "Run not finished or no manifest yet")
-    out_dir = Path(OUTPUT_DIR)
+    out_dir = Path(run.get("output_dir") or OUTPUT_DIR)
     def url(p):  # -> absolute URL path for <video src> / downloads
-        return "/" + str(p).replace("\\", "/").lstrip("/")
+        path = Path(p)
+        try:
+            relative = path.resolve().relative_to(OUTPUT_DIR.resolve())
+            return "/output/" + relative.as_posix()
+        except ValueError:
+            return "/" + str(path).replace("\\", "/").lstrip("/")
 
     clips, subtitles, formatted, burned, audio, thumbs, social = [], [], [], [], [], [], []
 
