@@ -78,6 +78,8 @@ clip_agent:
   # Finish a nearby transcript sentence, but do not follow an unusually long
   # Whisper segment far beyond the protected payoff window
   transcript_boundary_max_extension: 2.0
+  # Maximum score bonus when emotional language overlaps a strong audio peak
+  emotion_audio_fusion_bonus: 15.0
   # Ensure clips start/end at silence boundaries for clean cuts
   snap_to_silence: true
 

@@ -55,6 +55,9 @@ class ClipAgent(BaseAgent):
         self.transcript_boundary_max_extension = self.clip_config.get(
             "transcript_boundary_max_extension", 2.0
         )
+        self.emotion_audio_fusion_bonus = self.clip_config.get(
+            "emotion_audio_fusion_bonus", 15.0
+        )
         self.snap_to_silence = self.clip_config.get("snap_to_silence", True)
         self.whisper_model = config.get("subtitle_agent", {}).get("whisper_model", "base")
 
@@ -151,6 +154,11 @@ class ClipAgent(BaseAgent):
                 "reason": hl["reason"],
                 "transcript_preview": hl.get("text_preview", ""),
                 "detected_language": detected_lang or hl.get("detected_language", ""),
+                "selection_score": round(hl.get("score", 0), 1),
+                "sentiment_intensity": hl.get("sentiment_intensity", 0),
+                "audio_energy_score": hl.get("audio_energy_score", 0),
+                "audio_energy_db": hl.get("audio_energy_db"),
+                "fusion_bonus": hl.get("fusion_bonus", 0),
             })
 
         self.log(f"Created {len(clips)} clips from {video_name}")
@@ -183,6 +191,10 @@ class ClipAgent(BaseAgent):
         if content_analysis:
             key_moment_hls = self._find_key_moment_highlights(content_analysis, video_info)
             highlights.extend(key_moment_hls)
+
+        # Combine emotional and audio evidence before overlapping candidates are
+        # deduplicated, so corroborating signals reinforce rather than compete.
+        highlights = self._fuse_emotion_and_energy(highlights)
 
         # Deduplicate overlapping highlights (keep highest scoring)
         highlights = self._deduplicate_highlights(highlights)
@@ -319,7 +331,12 @@ class ClipAgent(BaseAgent):
         top_count = min(self.max_clips * 3, len(segments))
 
         highlights = []
-        for seg in segments[:top_count]:
+        selected_segments = segments[:top_count]
+        energy_values = [seg["energy"] for seg in selected_segments]
+        min_energy = min(energy_values)
+        max_energy = max(energy_values)
+
+        for seg in selected_segments:
             # Expand to minimum clip duration
             start = seg["start"]
             end = seg["end"]
@@ -336,6 +353,14 @@ class ClipAgent(BaseAgent):
             # Normalize energy to a score (higher energy = higher score)
             # Energy is in dB (negative), closer to 0 = louder
             score = max(1, int(50 + seg["energy"]))  # Convert to positive score
+            if max_energy == min_energy:
+                energy_score = 100.0
+            else:
+                energy_score = round(
+                    50 + 50 * (seg["energy"] - min_energy) /
+                    (max_energy - min_energy),
+                    1,
+                )
 
             highlights.append({
                 "start": start,
@@ -344,6 +369,11 @@ class ClipAgent(BaseAgent):
                 "reason": f"high audio energy ({seg['energy']:.1f}dB)",
                 "text_preview": "",
                 "title": f"Energy peak at {seg['start']:.0f}s",
+                "source": "audio_energy",
+                "audio_peak_start": seg["start"],
+                "audio_peak_end": seg["end"],
+                "audio_energy_db": round(seg["energy"], 1),
+                "audio_energy_score": energy_score,
             })
 
         return highlights
@@ -397,7 +427,55 @@ class ClipAgent(BaseAgent):
                 "reason": reason,
                 "text_preview": km.get("text_preview", ""),
                 "title": self._generate_title(km.get("text", "")),
+                "source": "content_key_moment",
+                "sentiment_intensity": km.get("sentiment_score", 0),
             })
+
+        return highlights
+
+    def _fuse_emotion_and_energy(self, highlights: List[Dict]) -> List[Dict]:
+        """Reward key moments corroborated by an overlapping audio peak.
+
+        The semantic key-moment candidate is retained so its title, transcript,
+        and reason survive deduplication. Its fused score starts from the larger
+        of the two source scores, then adds a bounded bonus based on emotional
+        intensity and relative audio energy.
+        """
+        energy_candidates = [
+            hl for hl in highlights if hl.get("source") == "audio_energy"
+        ]
+
+        for hl in highlights:
+            intensity = hl.get("sentiment_intensity", 0)
+            if intensity <= 0 or hl.get("source") != "content_key_moment":
+                continue
+
+            overlapping_energy = [
+                energy for energy in energy_candidates
+                if energy.get("audio_peak_start", energy["start"]) < hl["end"]
+                and energy.get("audio_peak_end", energy["end"]) > hl["start"]
+            ]
+            if not overlapping_energy:
+                continue
+
+            strongest = max(
+                overlapping_energy,
+                key=lambda energy: energy.get("audio_energy_score", 0),
+            )
+            emotion_factor = min(1.0, intensity / 3.0)
+            energy_factor = strongest.get("audio_energy_score", 0) / 100.0
+            fusion_bonus = round(
+                self.emotion_audio_fusion_bonus * emotion_factor * energy_factor,
+                1,
+            )
+
+            hl["score"] = round(
+                max(hl["score"], strongest["score"]) + fusion_bonus, 1
+            )
+            hl["audio_energy_score"] = strongest.get("audio_energy_score", 0)
+            hl["audio_energy_db"] = strongest.get("audio_energy_db")
+            hl["fusion_bonus"] = fusion_bonus
+            hl["reason"] = f"{hl['reason']}; emotional + audio peak"
 
         return highlights
 

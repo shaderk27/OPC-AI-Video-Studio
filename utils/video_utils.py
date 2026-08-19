@@ -244,7 +244,11 @@ def get_audio_energy_segments(
     segments = []
     current_time = 0.0
 
-    for line in result.stderr.split("\n"):
+    # ametadata's ``file=-`` output is written to stdout by ffmpeg, while
+    # diagnostics remain on stderr. Parse both for compatibility with ffmpeg
+    # builds that route filter metadata differently.
+    metadata_output = f"{result.stdout}\n{result.stderr}"
+    for line in metadata_output.splitlines():
         if "pts_time:" in line:
             try:
                 current_time = float(line.split("pts_time:")[1].strip())
