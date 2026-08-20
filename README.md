@@ -23,7 +23,7 @@ Give it a 10+ minute raw video (travel vlog, lecture, match footage, etc.) and t
 | Agent | Role | What It Does |
 |-------|------|-------------|
 | **Content Analyzer** | Video Content Intelligence Analyst | Pre-analyzes full video: transcribes, detects topics, sentiment, chapters, key moments, generates summary. Enriches all downstream agents. |
-| **Clip Expert** | Video Highlight Cutter | Uses topics, emotion, audio energy, hook scoring, optional Gemini transcript review, and completion padding to select complete highlights |
+| **Clip Expert** | Video Highlight Cutter | Uses topics, emotion, audio energy, hook scoring, and Gemini transcript + visual review to select complete highlights |
 | **Subtitle Expert** | Multi-Language Subtitle Generator | Uses Whisper for speech-to-text, translates subtitles into any language |
 | **Audio Expert** | Audio Translation Specialist | Translates speech and generates AI voiceover in target languages, merges with video |
 | **Thumbnail Generator** | Thumbnail Creator | Extracts key frames and adds text overlays for eye-catching thumbnails |
@@ -167,13 +167,15 @@ The Clip Expert uses multiple strategies to find interesting moments:
 - **Content topics**: Scores candidates against Content Analyzer topics and promotes diverse relevant moments
 - **Emotion + audio energy**: Rewards moments where strong sentiment and audible energy occur together
 - **Hook score**: Ranks opening strength, emotion, audio energy, specificity, and coherence
-- **Gemini editorial review**: Optionally reviews timestamped transcript excerpts for hook, flow, value, and standalone completeness, then blends that judgement with the measurable score
+- **Gemini editorial review**: Reviews timestamped transcript excerpts, then inspects temporary candidate-video proxies for hook, payoff, visual interest, standalone completeness, and safer clip boundaries
 - **Silence detection**: Snaps clip boundaries to silence for clean cuts
 - **Combined** (default): Uses all strategies together
 
-Only transcript excerpts, candidate timestamps, topics, and numeric scores are
-sent to Gemini in this first integration; video files and frames are not
-uploaded. Configure or disable it in `config.yaml`:
+When Gemini review is enabled, transcript excerpts, timestamps, topics, scores,
+and lightweight temporary candidate-video proxies are sent to Gemini. Proxies
+include surrounding context so Gemini can reject weak candidates or improve
+their boundaries. Local and Gemini-hosted temporary files are deleted after
+review. Configure or disable it in `config.yaml`:
 
 ```yaml
 clip_agent:
@@ -183,12 +185,18 @@ clip_agent:
     model: "gemini-3.5-flash-lite"
     candidate_limit: 12
     blend_weight: 0.5
+    video_review_enabled: true
+    video_candidate_limit: 10
+    video_context_seconds: 4.0
+    video_min_score: 60
+    video_blend_weight: 0.8
 ```
 
 In the web control panel, enable **Require Gemini API** under Advanced options
-to make the review mandatory for that run. Missing credentials, SDK errors,
-timeouts, unreachable API responses, and invalid model output then fail the
-Clip stage and display the reason. Leave it off to retain heuristic fallback.
+to make transcript and visual review mandatory. Missing credentials, SDK
+errors, proxy/upload problems, timeouts, invalid output, or rejection of every
+candidate then fail the Clip stage and display the reason. Leave it off to
+retain heuristic fallback.
 
 ### Whisper Model Sizes
 

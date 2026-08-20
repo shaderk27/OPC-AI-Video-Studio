@@ -727,11 +727,13 @@ function renderReview() {
 
   state.review.forEach((clip) => {
     const card = el("div", "review-card" + (clip.decision === "dropped" ? " dropped" : ""));
-    const hook = clip.hook_score != null ? `<span class="rc-hook">hook ${clip.hook_score}</span>` : "";
+    const score = clip.gemini_video_score != null
+      ? `<span class="rc-hook">Gemini ${clip.gemini_video_score}</span>`
+      : (clip.hook_score != null ? `<span class="rc-hook">hook ${clip.hook_score}</span>` : "");
     card.innerHTML = `
       <div class="rc-video">
         ${preview(clip)}
-        <span class="rc-badge">${clip.index} · ${fmtTime(clip.duration)}</span>${hook}
+        <span class="rc-badge">${clip.index} · ${fmtTime(clip.duration)}</span>${score}
       </div>
       <div class="rc-body">
         <div class="rc-title">${esc(clip.title)}</div>
@@ -739,7 +741,8 @@ function renderReview() {
           <span>subs: ${esc((clip.subtitle_langs || []).join(", ") || "—")}</span>
           <span>${fmtTime(clip.start)} → ${fmtTime(clip.end)}</span>
         </div>
-        <div class="rc-reason">${esc(clip.reason || "")}</div>
+        <div class="rc-reason">${esc(clip.gemini_video_reason || clip.reason || "")}</div>
+        ${clip.gemini_event_type ? `<div class="rc-reason">Event: ${esc(clip.gemini_event_type)}</div>` : ""}
       </div>
       <div class="rc-actions">
         <button class="btn btn-approve ${clip.decision === "approved" ? "on" : ""}" data-act="approve">✓ Approve</button>

@@ -310,6 +310,10 @@ async def get_clips(run_id: str):
             "reason": clip.get("reason", ""),
             "detected_language": clip.get("detected_language"),
             "transcript_preview": clip.get("transcript_preview"),
+            "gemini_video_reviewed": clip.get("gemini_video_reviewed", False),
+            "gemini_video_score": clip.get("gemini_video_score"),
+            "gemini_event_type": clip.get("gemini_event_type", ""),
+            "gemini_video_reason": clip.get("gemini_video_reason", ""),
         }
 
         # Add thumbnails if available

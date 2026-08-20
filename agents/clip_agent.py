@@ -18,6 +18,7 @@ Output: A set of short clips saved to the clips directory.
 
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -28,6 +29,7 @@ from utils.video_utils import (
     extract_audio,
     detect_silence,
     get_audio_energy_segments,
+    create_review_proxy,
 )
 from utils.subtitle_utils import transcribe_audio, detect_language_from_segments
 from utils.gemini_clip_reviewer import GeminiClipReviewer, GeminiRequiredError
@@ -74,9 +76,28 @@ class ClipAgent(BaseAgent):
         self.gemini_review_weight = min(
             1.0, max(0.0, float(gemini_config.get("blend_weight", 0.5)))
         )
+        self.gemini_video_review_enabled = (
+            bool(gemini_config.get("video_review_enabled", True)) and
+            (bool(gemini_config.get("enabled", False)) or self.gemini_review_required)
+        )
+        self.gemini_video_candidate_limit = max(
+            self.max_clips,
+            int(gemini_config.get("video_candidate_limit", self.max_clips * 2)),
+        )
+        self.gemini_video_context_seconds = max(
+            0.0, float(gemini_config.get("video_context_seconds", 4.0))
+        )
+        self.gemini_video_min_score = min(
+            100.0, max(0.0, float(gemini_config.get("video_min_score", 60.0)))
+        )
+        self.gemini_video_review_weight = min(
+            1.0, max(0.0, float(gemini_config.get("video_blend_weight", 0.8)))
+        )
         self.gemini_reviewer = GeminiClipReviewer(config)
         if self.gemini_review_required:
             self.gemini_reviewer.enabled = True
+            self.gemini_video_review_enabled = True
+            self.gemini_reviewer.video_review_enabled = True
 
     def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -139,7 +160,13 @@ class ClipAgent(BaseAgent):
         # Step 5: Apply output padding once, while enforcing duration limits.
         highlights = self._finalize_clip_boundaries(highlights, total_duration)
 
-        # Step 6: Cut the clips
+        # Step 6: Visually verify the actual candidate videos. Gemini may reject
+        # weak candidates or refine their boundaries using the proxy context.
+        highlights = self._apply_gemini_video_review(
+            video_path, highlights, total_duration
+        )
+
+        # Step 7: Cut the clips
         clips_dir = self.paths.get("clips_dir", "output/clips")
         self.ensure_dir(clips_dir)
         clips = []
@@ -189,6 +216,16 @@ class ClipAgent(BaseAgent):
                 "llm_score_breakdown": hl.get("llm_score_breakdown", {}),
                 "llm_reason": hl.get("llm_reason", ""),
                 "pre_llm_selection_score": hl.get("pre_llm_selection_score"),
+                "gemini_video_reviewed": hl.get("gemini_video_reviewed", False),
+                "gemini_video_accepted": hl.get("gemini_video_accepted"),
+                "gemini_video_score": hl.get("gemini_video_score"),
+                "gemini_video_score_breakdown": hl.get(
+                    "gemini_video_score_breakdown", {}
+                ),
+                "gemini_event_type": hl.get("gemini_event_type", ""),
+                "gemini_video_reason": hl.get("gemini_video_reason", ""),
+                "pre_gemini_video_start": hl.get("pre_gemini_video_start"),
+                "pre_gemini_video_end": hl.get("pre_gemini_video_end"),
             })
 
         self.log(f"Created {len(clips)} clips from {video_name}")
@@ -542,6 +579,149 @@ class ClipAgent(BaseAgent):
         )
         return highlights
 
+    def _apply_gemini_video_review(
+        self,
+        video_path: str,
+        highlights: List[Dict],
+        total_duration: float,
+    ) -> List[Dict]:
+        """Visually verify candidate proxies and apply safe boundary edits."""
+        if not highlights or not self.gemini_video_review_enabled:
+            return highlights
+        if not self.gemini_reviewer.available:
+            if self.gemini_review_required:
+                raise GeminiRequiredError(
+                    "Gemini API is required for visual clip review but is unavailable: "
+                    f"{self.gemini_reviewer.unavailable_reason}."
+                )
+            self.log(
+                f"Gemini visual review skipped: {self.gemini_reviewer.unavailable_reason}",
+                "warning",
+            )
+            return highlights
+
+        candidates = highlights[:self.gemini_video_candidate_limit]
+        try:
+            output_dir = self.paths.get("output_dir", "output")
+            self.ensure_dir(output_dir)
+            with tempfile.TemporaryDirectory(
+                prefix="gemini_clip_review_", dir=output_dir
+            ) as temp_dir:
+                review_candidates = []
+                for index, highlight in enumerate(candidates):
+                    proxy_start = max(
+                        0.0,
+                        float(highlight["start"]) - self.gemini_video_context_seconds,
+                    )
+                    proxy_end = min(
+                        total_duration,
+                        float(highlight["end"]) + self.gemini_video_context_seconds,
+                    )
+                    proxy_path = os.path.join(temp_dir, f"candidate_{index}.mp4")
+                    create_review_proxy(
+                        video_path, proxy_start, proxy_end, proxy_path
+                    )
+                    review_candidate = dict(highlight)
+                    review_candidate.update({
+                        "proxy_path": proxy_path,
+                        "proxy_start": proxy_start,
+                        "proxy_end": proxy_end,
+                    })
+                    review_candidates.append(review_candidate)
+
+                reviews = self.gemini_reviewer.review_candidate_videos(
+                    review_candidates
+                )
+        except Exception as exc:
+            if self.gemini_review_required:
+                raise GeminiRequiredError(
+                    "Gemini API is required for this run, but visual candidate "
+                    f"review failed: {exc}"
+                ) from exc
+            self.log(
+                f"Gemini visual review unavailable; keeping transcript ranking: {exc}",
+                "warning",
+            )
+            return highlights
+
+        accepted = []
+        for index, review in reviews.items():
+            highlight = candidates[index]
+            visual_score = float(review["visual_editorial_score"])
+            is_accepted = bool(review["accepted"]) and (
+                visual_score >= self.gemini_video_min_score
+            )
+            highlight["gemini_video_reviewed"] = True
+            highlight["gemini_video_accepted"] = is_accepted
+            highlight["gemini_video_score"] = round(visual_score, 1)
+            highlight["gemini_video_score_breakdown"] = review["score_breakdown"]
+            highlight["gemini_event_type"] = review["event_type"]
+            highlight["gemini_video_reason"] = review["reason"]
+            if not is_accepted:
+                continue
+
+            review_candidate = review_candidates[index]
+            highlight["pre_gemini_video_start"] = round(highlight["start"], 3)
+            highlight["pre_gemini_video_end"] = round(highlight["end"], 3)
+            suggested_start = (
+                review_candidate["proxy_start"] +
+                review["recommended_start_offset"]
+            )
+            suggested_end = (
+                review_candidate["proxy_start"] +
+                review["recommended_end_offset"]
+            )
+            highlight["start"], highlight["end"] = self._clamp_reviewed_boundaries(
+                suggested_start, suggested_end, total_duration
+            )
+            prior_score = float(highlight.get("score", 0))
+            highlight["score"] = round(
+                prior_score * (1.0 - self.gemini_video_review_weight) +
+                visual_score * self.gemini_video_review_weight,
+                1,
+            )
+            highlight["final_selection_score"] = highlight["score"]
+            accepted.append(highlight)
+
+        if not accepted:
+            message = (
+                "Gemini inspected the candidate videos but rejected all of them "
+                "as unsuitable or below the visual quality threshold."
+            )
+            if self.gemini_review_required:
+                raise GeminiRequiredError(message)
+            self.log(f"{message} Keeping the transcript-ranked candidates.", "warning")
+            return highlights
+
+        accepted.sort(key=lambda item: item["score"], reverse=True)
+        self.log(
+            f"Gemini visually accepted {len(accepted)}/{len(candidates)} "
+            f"candidate(s) with {self.gemini_reviewer.model}"
+        )
+        return accepted
+
+    def _clamp_reviewed_boundaries(
+        self,
+        start: float,
+        end: float,
+        total_duration: float,
+    ) -> Tuple[float, float]:
+        """Keep Gemini boundary suggestions valid and within duration limits."""
+        start = min(total_duration, max(0.0, float(start)))
+        end = min(total_duration, max(start, float(end)))
+        if end - start > self.max_duration:
+            start = max(0.0, end - self.max_duration)
+        if end - start < self.min_duration:
+            missing = self.min_duration - (end - start)
+            start = max(0.0, start - missing / 2)
+            end = min(total_duration, end + missing / 2)
+            if end - start < self.min_duration:
+                if start <= 0:
+                    end = min(total_duration, self.min_duration)
+                else:
+                    start = max(0.0, end - self.min_duration)
+        return round(start, 3), round(end, 3)
+
     def _fuse_emotion_and_energy(self, highlights: List[Dict]) -> List[Dict]:
         """Reward key moments corroborated by an overlapping audio peak.
 
@@ -766,33 +946,37 @@ class ClipAgent(BaseAgent):
         ranked = sorted(highlights, key=lambda hl: hl["score"], reverse=True)
         selected = []
         seen_topics = set()
+        selection_limit = (
+            self.gemini_video_candidate_limit
+            if self.gemini_video_review_enabled else self.max_clips
+        )
 
         for hl in ranked:
             topic = hl.get("matched_topic", "").lower()
             if hl.get("is_topic_relevant") and topic and topic not in seen_topics:
                 selected.append(hl)
                 seen_topics.add(topic)
-                if len(selected) >= self.max_clips:
+                if len(selected) >= selection_limit:
                     return selected
 
         # After topic coverage, keep other relevant clips ahead of candidates
         # that only happen to overlap a topic's timestamp.
-        if len(selected) < self.max_clips:
+        if len(selected) < selection_limit:
             selected_ids = {id(hl) for hl in selected}
             for hl in ranked:
                 if id(hl) in selected_ids or not hl.get("is_topic_relevant"):
                     continue
                 selected.append(hl)
-                if len(selected) >= self.max_clips:
+                if len(selected) >= selection_limit:
                     return selected
 
-        if len(selected) < self.max_clips:
+        if len(selected) < selection_limit:
             selected_ids = {id(hl) for hl in selected}
             for hl in ranked:
                 if id(hl) in selected_ids:
                     continue
                 selected.append(hl)
-                if len(selected) >= self.max_clips:
+                if len(selected) >= selection_limit:
                     break
 
         return selected

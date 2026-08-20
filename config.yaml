@@ -86,9 +86,10 @@ clip_agent:
   topic_relevance_weight: 0.55
   hook_score_weight: 0.45
   topic_relevance_threshold: 60.0
-  # Optional LLM editorial review. Only transcript excerpts, topics, timestamps,
-  # and numeric scores are sent; video files are not uploaded in this stage.
-  # If GEMINI_API_KEY is missing or the request fails, heuristic ranking is kept.
+  # Gemini reviews transcript/metadata candidates, then visually inspects
+  # lightweight temporary video proxies before the final clips are cut.
+  # If GEMINI_API_KEY is missing or a request fails, heuristic ranking is kept
+  # unless `required` is true.
   gemini_review:
     enabled: true
     # When true, any missing key, SDK problem, timeout, API error, or invalid
@@ -100,6 +101,14 @@ clip_agent:
     timeout_seconds: 45
     context_seconds: 5.0
     max_transcript_chars: 2400
+    # Reject loud-only/weak candidates and refine start/end timestamps using
+    # extra visual context around each proposed clip.
+    video_review_enabled: true
+    video_candidate_limit: 10
+    video_context_seconds: 4.0
+    video_min_score: 60
+    video_blend_weight: 0.8
+    video_processing_timeout_seconds: 180
   # Ensure clips start/end at silence boundaries for clean cuts
   snap_to_silence: true
 

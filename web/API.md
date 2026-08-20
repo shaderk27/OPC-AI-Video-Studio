@@ -133,8 +133,10 @@ Response: `{ "run_id": "20260818-1455-abc123" }` (server starts the pipeline in 
 
 Frontend falls back to polling `GET /api/runs/{run_id}` every 2 s if SSE fails.
 When `gemini_required` is true, the run fails if the Gemini key/SDK is missing,
-the API cannot be reached, the request times out, or the response is invalid.
-The reason is delivered through `run_failed` and the status snapshot's `error` field.
+a candidate proxy cannot be created or uploaded, the API cannot be reached,
+the request times out, a transcript/video response is invalid, or every visual
+candidate is rejected. The reason is delivered through `run_failed` and the
+status snapshot's `error` field.
 
 ## 6. `GET /api/runs/{run_id}` — status snapshot (poll fallback)
 

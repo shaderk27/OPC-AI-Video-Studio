@@ -41,7 +41,7 @@ class RunRequest(BaseModel):
     )
     gemini_required: bool = Field(
         False,
-        description="Fail the run if Gemini clip review cannot be completed",
+        description="Fail the run if Gemini transcript or visual clip review cannot be completed",
     )
 
 
@@ -106,6 +106,10 @@ class ClipInfo(BaseModel):
     reason: str
     detected_language: Optional[str] = None
     transcript_preview: Optional[str] = None
+    gemini_video_reviewed: bool = False
+    gemini_video_score: Optional[float] = None
+    gemini_event_type: Optional[str] = None
+    gemini_video_reason: Optional[str] = None
     subtitles: Dict[str, SubtitleInfo] = {}
     audio_translations: Dict[str, Dict[str, str]] = {}
     thumbnails: List[ThumbnailInfo] = []

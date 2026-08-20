@@ -387,6 +387,16 @@ def save_manifest(pipeline_data: dict, results: dict, elapsed: float, config: di
             "matched_topic": clip.get("matched_topic", ""),
             "is_topic_relevant": clip.get("is_topic_relevant", False),
             "selection_score": clip.get("selection_score", 0),
+            "gemini_video_reviewed": clip.get("gemini_video_reviewed", False),
+            "gemini_video_accepted": clip.get("gemini_video_accepted"),
+            "gemini_video_score": clip.get("gemini_video_score"),
+            "gemini_video_score_breakdown": clip.get(
+                "gemini_video_score_breakdown", {}
+            ),
+            "gemini_event_type": clip.get("gemini_event_type", ""),
+            "gemini_video_reason": clip.get("gemini_video_reason", ""),
+            "pre_gemini_video_start": clip.get("pre_gemini_video_start"),
+            "pre_gemini_video_end": clip.get("pre_gemini_video_end"),
         }
 
         if clip.get("subtitles"):

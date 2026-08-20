@@ -1,6 +1,7 @@
 import json
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from utils.gemini_clip_reviewer import GeminiClipReviewer, GeminiReviewError
@@ -25,6 +26,25 @@ class _FakeModels:
 class _FakeClient:
     def __init__(self, response):
         self.models = _FakeModels(response)
+
+
+class _FakeFiles:
+    def __init__(self):
+        self.uploaded = []
+        self.deleted = []
+
+    def upload(self, file):
+        uploaded = SimpleNamespace(
+            name=f"files/{len(self.uploaded) + 1}", state="ACTIVE", path=file
+        )
+        self.uploaded.append(uploaded)
+        return uploaded
+
+    def get(self, name):
+        return next(item for item in self.uploaded if item.name == name)
+
+    def delete(self, name):
+        self.deleted.append(name)
 
 
 def _config(**overrides):
@@ -123,6 +143,85 @@ class GeminiClipReviewerTests(unittest.TestCase):
         self.assertFalse(reviewer.available)
         self.assertEqual(reviewer.review_candidates([{"score": 1}]), {})
         self.assertEqual(reviewer.unavailable_reason, "GEMINI_API_KEY is not set")
+
+    def test_validates_visual_scores_and_safe_offsets(self):
+        candidates = [{"proxy_start": 6, "proxy_end": 34}]
+        parsed = {"reviews": [{
+            "candidate_id": "candidate_0",
+            "accept": True,
+            "event_type": "goal",
+            "hook": 80,
+            "flow": 70,
+            "payoff": 90,
+            "visual_interest": 85,
+            "standalone": 75,
+            "recommended_start_offset": 2,
+            "recommended_end_offset": 25,
+            "reason": "The complete goal and celebration are visible.",
+        }]}
+
+        result = GeminiClipReviewer._validate_video_reviews(
+            parsed, {"candidate_0"}, candidates
+        )
+
+        self.assertTrue(result["candidate_0"]["accepted"])
+        self.assertEqual(result["candidate_0"]["visual_editorial_score"], 80.8)
+        self.assertEqual(result["candidate_0"]["recommended_end_offset"], 25)
+
+    def test_rejects_reversed_visual_boundaries(self):
+        parsed = {"reviews": [{
+            "candidate_id": "candidate_0",
+            "accept": False,
+            "event_type": "none",
+            "hook": 10,
+            "flow": 10,
+            "payoff": 10,
+            "visual_interest": 10,
+            "standalone": 10,
+            "recommended_start_offset": 12,
+            "recommended_end_offset": 5,
+            "reason": "No meaningful event.",
+        }]}
+
+        with self.assertRaisesRegex(GeminiReviewError, "reversed"):
+            GeminiClipReviewer._validate_video_reviews(
+                parsed,
+                {"candidate_0"},
+                [{"proxy_start": 0, "proxy_end": 20}],
+            )
+
+    def test_uploads_visual_candidates_and_deletes_remote_files(self):
+        response = _FakeResponse(parsed={"reviews": [{
+            "candidate_id": "candidate_0",
+            "accept": True,
+            "event_type": "demonstration",
+            "hook": 80,
+            "flow": 80,
+            "payoff": 80,
+            "visual_interest": 80,
+            "standalone": 80,
+            "recommended_start_offset": 1,
+            "recommended_end_offset": 19,
+            "reason": "Clear visual payoff.",
+        }]})
+        client = _FakeClient(response)
+        client.files = _FakeFiles()
+        reviewer = GeminiClipReviewer(_config(), client=client)
+
+        reviews = reviewer.review_candidate_videos([{
+            "proxy_path": "candidate.mp4",
+            "proxy_start": 6,
+            "proxy_end": 30,
+            "start": 10,
+            "end": 26,
+        }])
+
+        self.assertEqual(reviews[0]["visual_editorial_score"], 80.0)
+        self.assertEqual(client.files.deleted, ["files/1"])
+        call = client.models.calls[0]
+        self.assertEqual(call["model"], "gemini-3.5-flash-lite")
+        self.assertNotIn("temperature", call["config"])
+        self.assertIn(client.files.uploaded[0], call["contents"])
 
 
 if __name__ == "__main__":

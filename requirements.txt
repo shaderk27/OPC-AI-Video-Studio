@@ -18,7 +18,7 @@ rich>=13.0.0            # Console UI (tables, panels, progress bars)
 pysrt>=1.1.2            # SRT subtitle file parsing and manipulation
 Pillow>=10.0.0          # Image processing (thumbnails, text overlays)
 numpy>=1.24.0           # Numerical operations (used by moviepy + content analysis)
-google-genai>=1.21.0    # Optional Gemini transcript-based clip candidate review
+google-genai>=2.19.0    # Gemini 3.5 transcript + video clip candidate review
 python-dotenv>=1.0.0    # Load local API keys from the ignored .env file
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -171,6 +171,44 @@ def cut_clip(
     return output_path
 
 
+def create_review_proxy(
+    video_path: str,
+    start_time: float,
+    end_time: float,
+    output_path: str,
+    max_width: int = 640,
+) -> str:
+    """Create a small, accurately-seeked MP4 for multimodal review.
+
+    Review proxies preserve audio and visual timing while reducing upload size.
+    They are temporary analysis artifacts, not final deliverables.
+    """
+    start = max(0.0, float(start_time))
+    end = max(start, float(end_time))
+    duration = end - start
+    if duration <= 0:
+        raise ValueError("Review proxy duration must be greater than zero")
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        FFMPEG_PATH, "-y",
+        "-ss", f"{start:.3f}",
+        "-i", video_path,
+        "-t", f"{duration:.3f}",
+        "-map", "0:v:0",
+        "-map", "0:a:0?",
+        "-vf", f"scale={max(160, int(max_width))}:-2:force_original_aspect_ratio=decrease",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "32",
+        "-c:a", "aac", "-b:a", "64k", "-ac", "1",
+        "-movflags", "+faststart",
+        output_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg review proxy failed: {result.stderr[:500]}")
+    return output_path
+
+
 def extract_audio(video_path: str, output_path: str, sample_rate: int = 16000) -> str:
     """
     Extract audio from video as WAV file (16kHz mono for whisper).

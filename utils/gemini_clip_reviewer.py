@@ -7,6 +7,7 @@ required for the existing heuristic workflow to operate.
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -45,6 +46,38 @@ REVIEW_SCHEMA = {
 }
 
 
+VIDEO_REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reviews": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "candidate_id": {"type": "string"},
+                    "accept": {"type": "boolean"},
+                    "event_type": {"type": "string"},
+                    "hook": {"type": "number", "minimum": 0, "maximum": 100},
+                    "flow": {"type": "number", "minimum": 0, "maximum": 100},
+                    "payoff": {"type": "number", "minimum": 0, "maximum": 100},
+                    "visual_interest": {"type": "number", "minimum": 0, "maximum": 100},
+                    "standalone": {"type": "number", "minimum": 0, "maximum": 100},
+                    "recommended_start_offset": {"type": "number", "minimum": 0},
+                    "recommended_end_offset": {"type": "number", "minimum": 0},
+                    "reason": {"type": "string"},
+                },
+                "required": [
+                    "candidate_id", "accept", "event_type", "hook", "flow",
+                    "payoff", "visual_interest", "standalone",
+                    "recommended_start_offset", "recommended_end_offset", "reason"
+                ],
+            },
+        }
+    },
+    "required": ["reviews"],
+}
+
+
 class GeminiReviewError(RuntimeError):
     """Raised when Gemini does not return a complete, usable review."""
 
@@ -65,6 +98,12 @@ class GeminiClipReviewer:
         self.context_seconds = max(0.0, float(review_config.get("context_seconds", 5.0)))
         self.max_transcript_chars = max(
             200, int(review_config.get("max_transcript_chars", 2400))
+        )
+        self.video_review_enabled = bool(
+            review_config.get("video_review_enabled", True)
+        )
+        self.video_processing_timeout = max(
+            30, int(review_config.get("video_processing_timeout_seconds", 180))
         )
         self.api_key = os.environ.get("GEMINI_API_KEY", "").strip()
         self._client = client
@@ -124,7 +163,6 @@ class GeminiClipReviewer:
                 model=self.model,
                 contents=prompt,
                 config={
-                    "temperature": 0.2,
                     "response_mime_type": "application/json",
                     "response_json_schema": REVIEW_SCHEMA,
                 },
@@ -146,6 +184,185 @@ class GeminiClipReviewer:
             int(candidate_id.removeprefix("candidate_")): review
             for candidate_id, review in reviews.items()
         }
+
+    def review_candidate_videos(
+        self,
+        candidates: List[Dict[str, Any]],
+    ) -> Dict[int, Dict[str, Any]]:
+        """Upload and visually review temporary candidate video proxies.
+
+        Each candidate must provide ``proxy_path``, ``proxy_start`` and
+        ``proxy_end`` in source-video seconds. Recommended offsets are returned
+        relative to the proxy and converted to safe absolute timestamps by the
+        Clip Agent.
+        """
+        if not self.available or not self.video_review_enabled or not candidates:
+            return {}
+
+        client = self._get_client()
+        uploaded_files = []
+        contents: List[Any] = [self._build_video_prompt(candidates)]
+        try:
+            for index, candidate in enumerate(candidates):
+                uploaded = client.files.upload(file=candidate["proxy_path"])
+                uploaded_files.append(uploaded)
+                uploaded = self._wait_until_active(client, uploaded)
+                uploaded_files[-1] = uploaded
+                contents.extend([
+                    f"candidate_{index}",
+                    uploaded,
+                ])
+
+            response = client.models.generate_content(
+                model=self.model,
+                contents=contents,
+                config={
+                    "response_mime_type": "application/json",
+                    "response_json_schema": VIDEO_REVIEW_SCHEMA,
+                },
+            )
+            parsed = getattr(response, "parsed", None)
+            if not isinstance(parsed, dict):
+                try:
+                    parsed = json.loads(getattr(response, "text", "") or "")
+                except (TypeError, json.JSONDecodeError) as exc:
+                    raise GeminiReviewError(
+                        "Gemini returned invalid JSON for video review"
+                    ) from exc
+
+            expected_ids = {f"candidate_{index}" for index in range(len(candidates))}
+            reviews = self._validate_video_reviews(parsed, expected_ids, candidates)
+            return {
+                int(candidate_id.removeprefix("candidate_")): review
+                for candidate_id, review in reviews.items()
+            }
+        except GeminiReviewError:
+            raise
+        except Exception as exc:
+            raise GeminiReviewError(f"Gemini video review failed: {exc}") from exc
+        finally:
+            for uploaded in uploaded_files:
+                name = getattr(uploaded, "name", "")
+                if name:
+                    try:
+                        client.files.delete(name=name)
+                    except Exception:
+                        pass
+
+    def _wait_until_active(self, client: Any, uploaded: Any) -> Any:
+        deadline = time.monotonic() + self.video_processing_timeout
+        current = uploaded
+        while True:
+            state = getattr(current, "state", None)
+            state_name = getattr(state, "name", str(state or "")).upper()
+            if state_name in ("", "ACTIVE") or state_name.endswith("ACTIVE"):
+                return current
+            if state_name == "FAILED" or state_name.endswith("FAILED"):
+                raise GeminiReviewError("Gemini could not process a candidate video")
+            if time.monotonic() >= deadline:
+                raise GeminiReviewError("Gemini candidate video processing timed out")
+            time.sleep(1)
+            current = client.files.get(name=current.name)
+
+    @staticmethod
+    def _build_video_prompt(candidates: List[Dict[str, Any]]) -> str:
+        metadata = []
+        for index, candidate in enumerate(candidates):
+            proxy_start = float(candidate.get("proxy_start", 0))
+            proxy_end = float(candidate.get("proxy_end", proxy_start))
+            metadata.append({
+                "candidate_id": f"candidate_{index}",
+                "proxy_duration_seconds": round(proxy_end - proxy_start, 3),
+                "current_start_offset": round(
+                    float(candidate.get("start", proxy_start)) - proxy_start, 3
+                ),
+                "current_end_offset": round(
+                    float(candidate.get("end", proxy_end)) - proxy_start, 3
+                ),
+                "title": str(candidate.get("title", ""))[:200],
+                "transcript_preview": str(candidate.get("text_preview", ""))[:500],
+            })
+        return (
+            "You are the final visual editor for short-form highlight clips. Each attached "
+            "video is a candidate proxy with extra context before and after the current cut. "
+            "Inspect both video and audio. Reject clips that are merely loud, visually uneventful, "
+            "contextless, repetitive, or missing the action/payoff. Accept only clips that make "
+            "sense independently and contain a compelling event, useful idea, emotion, or story. "
+            "Score hook, flow, payoff, visual_interest, and standalone from 0 to 100. Recommend "
+            "start/end offsets in seconds relative to the beginning of that candidate proxy; use "
+            "the extra context to avoid abrupt starts and include the complete payoff/reaction. "
+            "Offsets must stay within proxy duration and end must be after start. Return exactly "
+            "one review for every candidate_id. Keep reasons under 240 characters.\n\n"
+            f"CANDIDATES:\n{json.dumps(metadata, ensure_ascii=False, separators=(',', ':'))}"
+        )
+
+    @staticmethod
+    def _validate_video_reviews(
+        parsed: Dict[str, Any],
+        expected_ids: set,
+        candidates: List[Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        raw_reviews = parsed.get("reviews")
+        if not isinstance(raw_reviews, list):
+            raise GeminiReviewError("Gemini video response is missing the reviews list")
+
+        validated = {}
+        for item in raw_reviews:
+            if not isinstance(item, dict):
+                raise GeminiReviewError("Gemini returned a malformed video review")
+            candidate_id = item.get("candidate_id")
+            if candidate_id not in expected_ids or candidate_id in validated:
+                raise GeminiReviewError(
+                    "Gemini returned unknown or duplicate video candidate IDs"
+                )
+            index = int(candidate_id.removeprefix("candidate_"))
+            candidate = candidates[index]
+            proxy_duration = max(
+                0.0,
+                float(candidate.get("proxy_end", 0)) -
+                float(candidate.get("proxy_start", 0)),
+            )
+
+            scores = {}
+            for name in ("hook", "flow", "payoff", "visual_interest", "standalone"):
+                value = item.get(name)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise GeminiReviewError(
+                        f"Gemini returned an invalid video {name} score"
+                    )
+                scores[name] = round(min(100.0, max(0.0, float(value))), 1)
+
+            start_offset = item.get("recommended_start_offset")
+            end_offset = item.get("recommended_end_offset")
+            if any(
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                for value in (start_offset, end_offset)
+            ):
+                raise GeminiReviewError("Gemini returned invalid video boundaries")
+            start_offset = min(proxy_duration, max(0.0, float(start_offset)))
+            end_offset = min(proxy_duration, max(0.0, float(end_offset)))
+            if end_offset <= start_offset:
+                raise GeminiReviewError("Gemini returned reversed video boundaries")
+
+            visual_score = round(
+                scores["hook"] * 0.20 + scores["flow"] * 0.20 +
+                scores["payoff"] * 0.25 + scores["visual_interest"] * 0.20 +
+                scores["standalone"] * 0.15,
+                1,
+            )
+            validated[candidate_id] = {
+                "accepted": bool(item.get("accept", False)),
+                "event_type": str(item.get("event_type", ""))[:80],
+                "visual_editorial_score": visual_score,
+                "score_breakdown": scores,
+                "recommended_start_offset": round(start_offset, 3),
+                "recommended_end_offset": round(end_offset, 3),
+                "reason": str(item.get("reason", ""))[:240],
+            }
+
+        if set(validated) != expected_ids:
+            raise GeminiReviewError("Gemini did not review every candidate video")
+        return validated
 
     def _get_client(self):
         if self._client is None:
