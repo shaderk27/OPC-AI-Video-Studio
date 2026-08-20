@@ -78,6 +78,28 @@ def _config(**overrides):
 
 
 class GeminiContentAnalyzerTests(unittest.TestCase):
+    @patch("google.genai.Client")
+    def test_client_retries_transient_connection_failures(self, mock_client):
+        analyzer = GeminiContentAnalyzer(
+            _config(timeout_seconds=30, retry_attempts=4)
+        )
+        analyzer.api_key = "test-key"
+
+        analyzer._get_client()
+
+        mock_client.assert_called_once_with(
+            api_key="test-key",
+            http_options={
+                "timeout": 30000,
+                "retry_options": {
+                    "attempts": 4,
+                    "initial_delay": 1.0,
+                    "max_delay": 8.0,
+                    "jitter": 0.5,
+                },
+            },
+        )
+
     def test_preflight_uses_short_timeout_without_retries(self):
         client = _Client([])
         analyzer = GeminiContentAnalyzer(

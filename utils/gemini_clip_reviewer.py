@@ -95,6 +95,9 @@ class GeminiClipReviewer:
         self.model = review_config.get("model", "gemini-3.5-flash-lite")
         self.candidate_limit = max(1, int(review_config.get("candidate_limit", 12)))
         self.timeout_ms = max(1000, int(review_config.get("timeout_seconds", 45) * 1000))
+        self.retry_attempts = min(
+            5, max(1, int(review_config.get("retry_attempts", 3)))
+        )
         self.context_seconds = max(0.0, float(review_config.get("context_seconds", 5.0)))
         self.max_transcript_chars = max(
             200, int(review_config.get("max_transcript_chars", 2400))
@@ -377,7 +380,15 @@ class GeminiClipReviewer:
 
             self._client = genai.Client(
                 api_key=self.api_key,
-                http_options={"timeout": self.timeout_ms},
+                http_options={
+                    "timeout": self.timeout_ms,
+                    "retry_options": {
+                        "attempts": self.retry_attempts,
+                        "initial_delay": 1.0,
+                        "max_delay": 8.0,
+                        "jitter": 0.5,
+                    },
+                },
             )
         return self._client
 

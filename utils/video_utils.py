@@ -49,6 +49,14 @@ def _run_media_command(cmd: List[str]) -> subprocess.CompletedProcess:
     )
 
 
+def _media_error_details(stderr: Optional[str], max_chars: int = 1500) -> str:
+    """Return the actionable tail of ffmpeg output instead of its banner."""
+    details = (stderr or "").strip()
+    if not details:
+        return "ffmpeg produced no error details"
+    return details[-max_chars:]
+
+
 def _parse_ffmpeg_info(stderr: Optional[str]) -> Dict:
     """
     Parse `ffmpeg -i <file>` stderr output into a media-info dict.
@@ -184,7 +192,9 @@ def cut_clip(
 
     result = _run_media_command(cmd)
     if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg cut failed: {result.stderr[:500]}")
+        raise RuntimeError(
+            f"ffmpeg cut failed: {_media_error_details(result.stderr)}"
+        )
 
     return output_path
 
@@ -215,7 +225,10 @@ def create_review_proxy(
         "-t", f"{duration:.3f}",
         "-map", "0:v:0",
         "-map", "0:a:0?",
-        "-vf", f"scale={max(160, int(max_width))}:-2:force_original_aspect_ratio=decrease",
+        "-vf", (
+            f"scale={max(160, int(max_width))}:-2:"
+            "force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1"
+        ),
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "32",
         "-c:a", "aac", "-b:a", "64k", "-ac", "1",
         "-movflags", "+faststart",
@@ -223,7 +236,9 @@ def create_review_proxy(
     ]
     result = _run_media_command(cmd)
     if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg review proxy failed: {result.stderr[:500]}")
+        raise RuntimeError(
+            f"ffmpeg review proxy failed: {_media_error_details(result.stderr)}"
+        )
     return output_path
 
 
@@ -245,7 +260,9 @@ def extract_audio(video_path: str, output_path: str, sample_rate: int = 16000) -
 
     result = _run_media_command(cmd)
     if result.returncode != 0:
-        raise RuntimeError(f"Audio extraction failed: {result.stderr[:500]}")
+        raise RuntimeError(
+            f"Audio extraction failed: {_media_error_details(result.stderr)}"
+        )
 
     return output_path
 
@@ -373,7 +390,9 @@ def merge_audio_into_video(
 
     result = _run_media_command(cmd)
     if result.returncode != 0:
-        raise RuntimeError(f"Audio merge failed: {result.stderr[:500]}")
+        raise RuntimeError(
+            f"Audio merge failed: {_media_error_details(result.stderr)}"
+        )
 
     return output_path
 
@@ -405,7 +424,9 @@ def resize_video(
 
     result = _run_media_command(cmd)
     if result.returncode != 0:
-        raise RuntimeError(f"Resize failed: {result.stderr[:500]}")
+        raise RuntimeError(
+            f"Resize failed: {_media_error_details(result.stderr)}"
+        )
 
     return output_path
 
@@ -435,7 +456,9 @@ def burn_subtitles_into_video(
 
     result = _run_media_command(cmd)
     if result.returncode != 0:
-        raise RuntimeError(f"Subtitle burn failed: {result.stderr[:500]}")
+        raise RuntimeError(
+            f"Subtitle burn failed: {_media_error_details(result.stderr)}"
+        )
 
     return output_path
 
@@ -455,7 +478,9 @@ def extract_frame(video_path: str, timestamp: float, output_path: str) -> str:
 
     result = _run_media_command(cmd)
     if result.returncode != 0:
-        raise RuntimeError(f"Frame extraction failed: {result.stderr[:500]}")
+        raise RuntimeError(
+            f"Frame extraction failed: {_media_error_details(result.stderr)}"
+        )
 
     return output_path
 

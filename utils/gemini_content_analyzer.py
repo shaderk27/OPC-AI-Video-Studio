@@ -128,6 +128,9 @@ class GeminiContentAnalyzer:
         self.preflight_timeout_ms = max(
             1000, int(float(settings.get("preflight_timeout_seconds", 10)) * 1000)
         )
+        self.retry_attempts = min(
+            5, max(1, int(settings.get("retry_attempts", 3)))
+        )
         self.chunk_max_chars = max(2000, int(settings.get("chunk_max_chars", 50000)))
         self.max_topics = max(1, int(settings.get("max_topics", 8)))
         self.max_key_moments = max(1, int(settings.get("max_key_moments", 12)))
@@ -244,7 +247,15 @@ class GeminiContentAnalyzer:
                 ) from exc
             self._client = genai.Client(
                 api_key=self.api_key,
-                http_options={"timeout": self.timeout_ms},
+                http_options={
+                    "timeout": self.timeout_ms,
+                    "retry_options": {
+                        "attempts": self.retry_attempts,
+                        "initial_delay": 1.0,
+                        "max_delay": 8.0,
+                        "jitter": 0.5,
+                    },
+                },
             )
         return self._client
 

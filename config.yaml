@@ -48,6 +48,9 @@ content_analyzer:
     required: true
     model: "gemini-3.5-flash-lite"
     timeout_seconds: 120
+    # Retry transient TLS resets, connection failures, timeouts, and retryable
+    # HTTP responses. The total includes the original request.
+    retry_attempts: 3
     # Fail quickly before full-video transcription if Gemini is unreachable.
     preflight_timeout_seconds: 10
     chunk_max_chars: 50000
@@ -113,6 +116,7 @@ clip_agent:
     candidate_limit: 12
     blend_weight: 0.5
     timeout_seconds: 45
+    retry_attempts: 3
     context_seconds: 5.0
     max_transcript_chars: 2400
     # Reject loud-only/weak candidates and refine start/end timestamps using
