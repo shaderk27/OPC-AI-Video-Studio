@@ -288,6 +288,14 @@ class ManagerAgent(BaseAgent):
                     self.stages_failed.append(stage)
                     self.errors.append(error_msg)
 
+                    gemini_required = bool(
+                        self.config.get("clip_agent", {})
+                        .get("gemini_review", {})
+                        .get("required", False)
+                    )
+                    if stage == "clip" and gemini_required:
+                        raise RuntimeError(error_msg) from e
+
                     # Core stages stop the pipeline
                     if stage in self.core_stages:
                         self.announce(

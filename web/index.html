@@ -172,6 +172,14 @@
               <label class="check"><input type="checkbox" id="adv-check-sub"><span>Quality: subtitle sync</span></label>
               <label class="check"><input type="checkbox" id="adv-check-sil"><span>Quality: silence gaps</span></label>
             </div>
+            <label class="switch-option">
+              <input type="checkbox" id="adv-gemini-required">
+              <span class="switch-track" aria-hidden="true"><span></span></span>
+              <span class="switch-copy">
+                <strong>Require Gemini API</strong>
+                <small>Stop and display an error if Gemini cannot review the clip candidates.</small>
+              </span>
+            </label>
             <label class="field-label">Agents to run</label>
             <div id="adv-stages" class="check-grid"></div>
           </div>
@@ -199,6 +207,7 @@
           <span id="progress-timer" class="chip chip-accent">0:00</span>
         </div>
       </div>
+      <div id="progress-error" class="pipeline-error hidden" role="alert"></div>
       <div id="stage-rail" class="stage-rail"></div>
       <div class="progress-log-head"><span>Live log</span><button id="log-clear" class="btn btn-ghost btn-sm">clear</button></div>
       <div id="log-console" class="log-console"><div class="muted">Waiting for pipeline…</div></div>

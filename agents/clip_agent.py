@@ -30,7 +30,7 @@ from utils.video_utils import (
     get_audio_energy_segments,
 )
 from utils.subtitle_utils import transcribe_audio, detect_language_from_segments
-from utils.gemini_clip_reviewer import GeminiClipReviewer
+from utils.gemini_clip_reviewer import GeminiClipReviewer, GeminiRequiredError
 
 
 class ClipAgent(BaseAgent):
@@ -70,10 +70,13 @@ class ClipAgent(BaseAgent):
         self.snap_to_silence = self.clip_config.get("snap_to_silence", True)
         self.whisper_model = config.get("subtitle_agent", {}).get("whisper_model", "base")
         gemini_config = self.clip_config.get("gemini_review", {})
+        self.gemini_review_required = bool(gemini_config.get("required", False))
         self.gemini_review_weight = min(
             1.0, max(0.0, float(gemini_config.get("blend_weight", 0.5)))
         )
         self.gemini_reviewer = GeminiClipReviewer(config)
+        if self.gemini_review_required:
+            self.gemini_reviewer.enabled = True
 
     def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -486,6 +489,12 @@ class ClipAgent(BaseAgent):
         if not highlights:
             return highlights
         if not self.gemini_reviewer.available:
+            if self.gemini_review_required:
+                raise GeminiRequiredError(
+                    "Gemini API is required for this run but is unavailable: "
+                    f"{self.gemini_reviewer.unavailable_reason}. "
+                    "Check GEMINI_API_KEY and the Gemini SDK installation."
+                )
             if self.gemini_reviewer.enabled:
                 self.log(
                     f"Gemini review skipped: {self.gemini_reviewer.unavailable_reason}",
@@ -501,6 +510,11 @@ class ClipAgent(BaseAgent):
                 detected_language=detected_language,
             )
         except Exception as exc:
+            if self.gemini_review_required:
+                raise GeminiRequiredError(
+                    "Gemini API is required for this run, but candidate review failed: "
+                    f"{exc}"
+                ) from exc
             self.log(
                 f"Gemini review unavailable; keeping heuristic ranking: {exc}",
                 "warning",

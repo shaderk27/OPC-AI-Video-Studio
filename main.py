@@ -261,6 +261,13 @@ def run_studio(video_path: str, config: dict, skip_stages: list = None,
                 pass  # stderr unavailable in detached server process
             if on_stage:
                 on_stage(stage, "failed", str(e))
+            gemini_required = bool(
+                config.get("clip_agent", {})
+                .get("gemini_review", {})
+                .get("required", False)
+            )
+            if stage == "clip" and gemini_required:
+                raise
             if stage in ("content_analysis", "clip", "subtitle"):  # Core stages - stop on failure
                 console.print(f"[red]Core stage '{escape(stage)}' failed. Stopping pipeline.[/red]")
                 break

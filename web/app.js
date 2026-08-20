@@ -93,6 +93,7 @@ const DEMO_CONFIG = {
     max_clips: 5, min_clip_duration: 15, max_clip_duration: 60,
     detection_strategy: "combined",
     padding_before: 1.5, padding_after: 1.0, snap_to_silence: true,
+    gemini_required: false,
     source_language: null,
     original_audio_volume: 0.15, voiceover_volume: 1.0, tts_speed: 1.0,
     thumbnail_enabled: true,
@@ -194,6 +195,15 @@ function renderSetup() {
   setNum($("#adv-tts-speed"), d.tts_speed, (v) => state.advanced.tts_speed = v);
 
   $("#adv-snap").checked = !!d.snap_to_silence;
+  $("#adv-gemini-required").checked = !!d.gemini_required;
+  $("#adv-gemini-required").addEventListener("change", () => {
+    if ($("#adv-gemini-required").checked) {
+      state.stages.add("clip");
+      const clipToggle = $('#adv-stages input[data-stage="clip"]');
+      if (clipToggle) clipToggle.checked = true;
+    }
+    updateRunSummary();
+  });
   $("#adv-thumb").checked = d.thumbnail_enabled !== false;
   $("#adv-check-av").checked = !!d.quality_checks?.av_sync;
   $("#adv-check-sub").checked = !!d.quality_checks?.subtitle_sync;
@@ -207,6 +217,7 @@ function renderSetup() {
     const lb = el("label", "check");
     const cb = el("input");
     cb.type = "checkbox";
+    cb.dataset.stage = s.id;
     cb.checked = state.stages.has(s.id);
     cb.addEventListener("change", () => {
       cb.checked ? state.stages.add(s.id) : state.stages.delete(s.id);
@@ -378,6 +389,7 @@ function updateRunSummary() {
     state.audioLangs.size ? `dub: ${[...state.audioLangs].join("+")}` : "no dubbing",
     `formats: ${state.formats.size}`,
     `clips ≤ ${$("#adv-max-clips").value || state.config.defaults.max_clips}`,
+    $("#adv-gemini-required").checked ? "Gemini required" : "Gemini optional",
   ];
   $("#run-summary").textContent = parts.join("  ·  ");
   btn.disabled = false;
@@ -403,6 +415,7 @@ function buildPayload() {
     padding_before: parseFloat($("#adv-pad-before").value) ?? d.padding_before,
     padding_after: parseFloat($("#adv-pad-after").value) ?? d.padding_after,
     snap_to_silence: $("#adv-snap").checked,
+    gemini_required: $("#adv-gemini-required").checked,
     source_language: state.advanced.source_language || null,
     original_audio_volume: parseFloat($("#adv-orig-vol").value) ?? d.original_audio_volume,
     voiceover_volume: parseFloat($("#adv-vo-vol").value) ?? d.voiceover_volume,
@@ -458,6 +471,8 @@ function resetRunState() {
   state.manifest = state.quality = state.downloads = null;
   state.runStartTs = Date.now();
   $("#stage-rail").innerHTML = "";
+  $("#progress-error").textContent = "";
+  $("#progress-error").classList.add("hidden");
   clearLog();
   if (state.pollTimer) clearInterval(state.pollTimer);
   if (state.clockTimer) clearInterval(state.clockTimer);
@@ -514,7 +529,7 @@ function startPolling(runId) {
     try {
       const snap = await api(`/api/runs/${runId}`);
       if (snap.status === "completed") { clearInterval(state.pollTimer); handleRunCompleted(); }
-      else if (snap.status === "failed") { clearInterval(state.pollTimer); handleRunFailed("pipeline failed (see log)"); }
+      else if (snap.status === "failed") { clearInterval(state.pollTimer); handleRunFailed(snap.error || "pipeline failed (see log)"); }
       else if (snap.status === "awaiting_review" && !state.reviewActive) { handleReviewReady(); }
       else {
         Object.entries(snap.stages || {}).forEach(([id, st]) => {
@@ -695,7 +710,10 @@ async function loadReviewDemo() {
 }
 
 function handleRunFailed(msg) {
-  log("Pipeline failed — " + msg, "err");
+  const message = msg || "Unknown pipeline error";
+  log("Pipeline failed — " + message, "err");
+  $("#progress-error").textContent = message;
+  $("#progress-error").classList.remove("hidden");
   enableStep("review", true); // still let them see whatever was produced
 }
 

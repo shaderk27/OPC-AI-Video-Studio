@@ -54,7 +54,7 @@ Copy-Item .env.example .env
 The application loads the project-level `.env` automatically. A value already
 set in the operating-system environment takes priority over the file.
 
-The default model is `gemini-2.5-flash-lite`. If the key is absent, the request
+The default model is `gemini-3.5-flash-lite`. If the key is absent, the request
 times out, or Gemini returns unusable output, the Clip Expert automatically
 keeps its original heuristic ranking.
 
@@ -179,10 +179,16 @@ uploaded. Configure or disable it in `config.yaml`:
 clip_agent:
   gemini_review:
     enabled: true
-    model: "gemini-2.5-flash-lite"
+    required: false
+    model: "gemini-3.5-flash-lite"
     candidate_limit: 12
     blend_weight: 0.5
 ```
+
+In the web control panel, enable **Require Gemini API** under Advanced options
+to make the review mandatory for that run. Missing credentials, SDK errors,
+timeouts, unreachable API responses, and invalid model output then fail the
+Clip stage and display the reason. Leave it off to retain heuristic fallback.
 
 ### Whisper Model Sizes
 

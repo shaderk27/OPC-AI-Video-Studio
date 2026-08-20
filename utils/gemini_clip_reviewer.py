@@ -49,13 +49,17 @@ class GeminiReviewError(RuntimeError):
     """Raised when Gemini does not return a complete, usable review."""
 
 
+class GeminiRequiredError(RuntimeError):
+    """Raised when a run requires Gemini and review cannot be completed."""
+
+
 class GeminiClipReviewer:
     """Review transcript-based clip candidates with Gemini structured output."""
 
     def __init__(self, config: Dict[str, Any], client: Any = None):
         review_config = config.get("clip_agent", {}).get("gemini_review", {})
         self.enabled = bool(review_config.get("enabled", False))
-        self.model = review_config.get("model", "gemini-2.5-flash-lite")
+        self.model = review_config.get("model", "gemini-3.5-flash-lite")
         self.candidate_limit = max(1, int(review_config.get("candidate_limit", 12)))
         self.timeout_ms = max(1000, int(review_config.get("timeout_seconds", 45) * 1000))
         self.context_seconds = max(0.0, float(review_config.get("context_seconds", 5.0)))
@@ -76,6 +80,16 @@ class GeminiClipReviewer:
             return "Gemini clip review is disabled"
         if not self._client and not self.api_key:
             return "GEMINI_API_KEY is not set"
+        return ""
+
+    def configuration_error(self) -> str:
+        """Return a user-facing setup error without making an API request."""
+        if not self.available:
+            return self.unavailable_reason
+        try:
+            self._get_client()
+        except GeminiReviewError as exc:
+            return str(exc)
         return ""
 
     def review_candidates(

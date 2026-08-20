@@ -52,6 +52,7 @@ The single source of truth for every option the UI renders. Return values **from
     "min_clip_duration": 15,
     "max_clip_duration": 60,
     "detection_strategy": "combined",
+    "gemini_required": false,
     "padding_before": 1.5,
     "padding_after": 1.0,
     "snap_to_silence": true,
@@ -97,6 +98,7 @@ Body (all fields optional; omitted → `defaults` from config):
   "min_clip_duration": 15,
   "max_clip_duration": 60,
   "detection_strategy": "combined",
+  "gemini_required": false,
   "padding_before": 1.5,
   "padding_after": 1.0,
   "snap_to_silence": true,
@@ -130,11 +132,15 @@ Response: `{ "run_id": "20260818-1455-abc123" }` (server starts the pipeline in 
 | `ping` | `{}` every 15 s (keep-alive) |
 
 Frontend falls back to polling `GET /api/runs/{run_id}` every 2 s if SSE fails.
+When `gemini_required` is true, the run fails if the Gemini key/SDK is missing,
+the API cannot be reached, the request times out, or the response is invalid.
+The reason is delivered through `run_failed` and the status snapshot's `error` field.
 
 ## 6. `GET /api/runs/{run_id}` — status snapshot (poll fallback)
 
 ```json
 { "run_id": "...", "status": "running|awaiting_review|completed|failed", "elapsed": 42.0,
+  "error": "",
   "stages": [ {"stage": "clip", "status": "active|done|failed|pending", "elapsed": 3.2} ],
   "clips_count": 5 }
 ```

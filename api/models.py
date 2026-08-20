@@ -39,6 +39,10 @@ class RunRequest(BaseModel):
     review_gate_enabled: bool = Field(
         True, description="Pause after clip stage for human review"
     )
+    gemini_required: bool = Field(
+        False,
+        description="Fail the run if Gemini clip review cannot be completed",
+    )
 
 
 class RunResponse(BaseModel):

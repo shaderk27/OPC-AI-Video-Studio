@@ -1,13 +1,14 @@
 import unittest
 
 from agents.clip_agent import ClipAgent
+from utils.gemini_clip_reviewer import GeminiRequiredError
 
 
 class _Reviewer:
     enabled = True
     available = True
     unavailable_reason = ""
-    model = "gemini-2.5-flash-lite"
+    model = "gemini-3.5-flash-lite"
 
     def __init__(self, reviews=None, error=None):
         self.reviews = reviews or {}
@@ -57,6 +58,37 @@ class ClipAgentGeminiReviewTests(unittest.TestCase):
         result = self.agent._apply_gemini_review(candidates, [], [], "en")
 
         self.assertEqual(result, [{"score": 63, "final_selection_score": 63}])
+
+    def test_required_mode_raises_when_request_fails(self):
+        agent = ClipAgent({
+            "clip_agent": {
+                "gemini_review": {
+                    "enabled": True,
+                    "required": True,
+                },
+            },
+        })
+        agent.gemini_reviewer = _Reviewer(error=TimeoutError("timed out"))
+
+        with self.assertRaisesRegex(GeminiRequiredError, "candidate review failed"):
+            agent._apply_gemini_review([{"score": 63}], [], [], "en")
+
+    def test_required_mode_raises_when_key_is_missing(self):
+        agent = ClipAgent({
+            "clip_agent": {
+                "gemini_review": {
+                    "enabled": True,
+                    "required": True,
+                },
+            },
+        })
+        reviewer = _Reviewer()
+        reviewer.available = False
+        reviewer.unavailable_reason = "GEMINI_API_KEY is not set"
+        agent.gemini_reviewer = reviewer
+
+        with self.assertRaisesRegex(GeminiRequiredError, "GEMINI_API_KEY"):
+            agent._apply_gemini_review([{"score": 63}], [], [], "en")
 
 
 if __name__ == "__main__":

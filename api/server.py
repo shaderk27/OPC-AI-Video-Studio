@@ -170,6 +170,23 @@ async def run_pipeline(request: RunRequest):
     if request.review_gate_enabled is not None:
         config.setdefault("manager_agent", {})["review_gate_enabled"] = request.review_gate_enabled
 
+    gemini_review = config.setdefault("clip_agent", {}).setdefault("gemini_review", {})
+    gemini_review["required"] = request.gemini_required
+    if request.gemini_required:
+        if request.skip_stages and "clip" in request.skip_stages:
+            raise HTTPException(
+                status_code=400,
+                detail="Require Gemini API also requires the Clip Expert stage.",
+            )
+        gemini_review["enabled"] = True
+        from utils.gemini_clip_reviewer import GeminiClipReviewer
+        setup_error = GeminiClipReviewer(config).configuration_error()
+        if setup_error:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Gemini API is required but not configured: {setup_error}",
+            )
+
     # Start the run
     run_id = runner.start_run(
         video_path=video_path,

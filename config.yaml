@@ -91,7 +91,10 @@ clip_agent:
   # If GEMINI_API_KEY is missing or the request fails, heuristic ranking is kept.
   gemini_review:
     enabled: true
-    model: "gemini-2.5-flash-lite"
+    # When true, any missing key, SDK problem, timeout, API error, or invalid
+    # response fails the Clip stage and the entire run instead of falling back.
+    required: false
+    model: "gemini-3.5-flash-lite"
     candidate_limit: 12
     blend_weight: 0.5
     timeout_seconds: 45

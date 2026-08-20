@@ -30,7 +30,7 @@ class _FakeClient:
 def _config(**overrides):
     settings = {
         "enabled": True,
-        "model": "gemini-2.5-flash-lite",
+        "model": "gemini-3.5-flash-lite",
         "candidate_limit": 2,
         "timeout_seconds": 10,
         "context_seconds": 1,
@@ -76,7 +76,7 @@ class GeminiClipReviewerTests(unittest.TestCase):
         self.assertEqual(reviews[0]["editorial_score"], 73.0)
         self.assertEqual(reviews[0]["reason"], "Clear hook and payoff.")
         call = client.models.calls[0]
-        self.assertEqual(call["model"], "gemini-2.5-flash-lite")
+        self.assertEqual(call["model"], "gemini-3.5-flash-lite")
         self.assertEqual(call["config"]["response_mime_type"], "application/json")
         self.assertIn("Here is the surprising result.", call["contents"])
         self.assertNotIn("Unrelated material.", call["contents"])

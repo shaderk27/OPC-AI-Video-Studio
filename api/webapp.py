@@ -22,7 +22,6 @@ import shutil
 import subprocess
 import threading
 import time
-import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -67,6 +66,7 @@ def _new_run() -> Dict[str, Any]:
         "approved_indices": None,
         "output_dir": "",
         "review_event": threading.Event(),
+        "error": "",
         "log": [],
     }
 
@@ -156,6 +156,7 @@ def _defaults(cfg: dict) -> dict:
     sub = cfg.get("subtitle_agent", {})
     aud = cfg.get("audio_agent", {})
     clp = cfg.get("clip_agent", {})
+    gemini = clp.get("gemini_review", {})
     fmt = cfg.get("format_agent", {})
     qa = cfg.get("quality_agent", {})
     return {
@@ -174,6 +175,7 @@ def _defaults(cfg: dict) -> dict:
         "padding_before": clp.get("padding_before", 1.5),
         "padding_after": clp.get("padding_after", 1.0),
         "snap_to_silence": clp.get("snap_to_silence", True),
+        "gemini_required": gemini.get("required", False),
         "source_language": sub.get("source_language"),
         "original_audio_volume": aud.get("original_audio_volume", 0.15),
         "voiceover_volume": aud.get("voiceover_volume", 1.0),
@@ -262,6 +264,7 @@ class WebRunRequest(BaseModel):
     padding_before: Optional[float] = None
     padding_after: Optional[float] = None
     snap_to_silence: Optional[bool] = None
+    gemini_required: Optional[bool] = None
     source_language: Optional[str] = None
     original_audio_volume: Optional[float] = None
     voiceover_volume: Optional[float] = None
@@ -298,6 +301,10 @@ def _apply_overrides(cfg: dict, req: WebRunRequest, run: dict):
     clp["padding_before"] = pick(req.padding_before, d["padding_before"])
     clp["padding_after"] = pick(req.padding_after, d["padding_after"])
     clp["snap_to_silence"] = pick(req.snap_to_silence, d["snap_to_silence"])
+    gemini = clp.setdefault("gemini_review", {})
+    gemini["required"] = pick(req.gemini_required, d["gemini_required"])
+    if gemini["required"]:
+        gemini["enabled"] = True
 
     fmt = cfg.setdefault("format_agent", {})
     selected = set(pick(req.formats, d["formats"]))
@@ -315,6 +322,8 @@ def _apply_overrides(cfg: dict, req: WebRunRequest, run: dict):
     # stage selection -> skip list
     all_stages = [s["id"] for s in STAGES]
     active = [s for s in all_stages if s in set(pick(req.stages, d["stages"]))]
+    if gemini["required"] and "clip" not in active:
+        active = [s for s in all_stages if s in set(active) | {"clip"}]
     if pick(req.thumbnail_enabled, True) is False and "thumbnail" in active:
         active.remove("thumbnail")
     skip = [s for s in all_stages if s not in active]
@@ -448,7 +457,8 @@ def _run_worker(run_id: str, req: WebRunRequest):
     except Exception as e:
         run["status"] = "failed"
         run["elapsed"] = round(time.time() - start, 1)
-        _emit(run, "run_failed", {"run_id": run_id, "error": f"{e}\n{traceback.format_exc()}"})
+        run["error"] = str(e)
+        _emit(run, "run_failed", {"run_id": run_id, "error": run["error"]})
     finally:
         ACTIVE_RUN["busy"] = False
 
@@ -547,6 +557,20 @@ def _burn_subtitles(run: dict, cfg: dict, langs: list):
 def api_run(req: WebRunRequest):
     if ACTIVE_RUN.get("busy"):
         raise HTTPException(409, "A run is already in progress. Wait for it to finish or refresh.")
+    if req.gemini_required:
+        if req.stages is not None and "clip" not in req.stages:
+            raise HTTPException(
+                400, "Require Gemini API also requires the Clip Expert stage."
+            )
+        cfg = load_config()
+        gemini = cfg.setdefault("clip_agent", {}).setdefault("gemini_review", {})
+        gemini.update({"enabled": True, "required": True})
+        from utils.gemini_clip_reviewer import GeminiClipReviewer
+        setup_error = GeminiClipReviewer(cfg).configuration_error()
+        if setup_error:
+            raise HTTPException(
+                400, f"Gemini API is required but not configured: {setup_error}"
+            )
     run = _new_run()
     run["video"] = req.video
     RUNS[run["id"]] = run
@@ -607,6 +631,7 @@ def api_run_status(run_id: str):
             if run.get("status") == "awaiting_review"
             else (run.get("manifest") or {}).get("clips", [])
         ),
+        "error": run.get("error", ""),
     }
 
 
