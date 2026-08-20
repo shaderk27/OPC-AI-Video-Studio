@@ -9,7 +9,7 @@ A multi-agent platform that turns long videos into short, engaging social media 
 Give it a 10+ minute raw video (travel vlog, lecture, match footage, etc.) and the studio will:
 
 1. **Analyze content** — transcribe the full video, detect topics, sentiment, chapters, and key moments
-2. **Find highlights** and cut them into 15-60s clips (using topic relevance, emotion, audio energy, and hook scoring)
+2. **Find highlights** and cut them into 15-60s clips (using topic relevance, emotion, audio energy, hook scoring, and optional Gemini editorial review)
 3. **Pause for clip approval** so rejected candidates do not receive further processing
 4. **Generate subtitles** in multiple languages
 5. **Translate audio** into multiple languages with AI voiceover
@@ -23,7 +23,7 @@ Give it a 10+ minute raw video (travel vlog, lecture, match footage, etc.) and t
 | Agent | Role | What It Does |
 |-------|------|-------------|
 | **Content Analyzer** | Video Content Intelligence Analyst | Pre-analyzes full video: transcribes, detects topics, sentiment, chapters, key moments, generates summary. Enriches all downstream agents. |
-| **Clip Expert** | Video Highlight Cutter | Uses topics, emotion, audio energy, hook scoring, and completion padding to select complete highlights |
+| **Clip Expert** | Video Highlight Cutter | Uses topics, emotion, audio energy, hook scoring, optional Gemini transcript review, and completion padding to select complete highlights |
 | **Subtitle Expert** | Multi-Language Subtitle Generator | Uses Whisper for speech-to-text, translates subtitles into any language |
 | **Audio Expert** | Audio Translation Specialist | Translates speech and generates AI voiceover in target languages, merges with video |
 | **Thumbnail Generator** | Thumbnail Creator | Extracts key frames and adds text overlays for eye-catching thumbnails |
@@ -39,7 +39,24 @@ Give it a 10+ minute raw video (travel vlog, lecture, match footage, etc.) and t
 pip install -r requirements.txt
 ```
 
-This installs: moviepy, imageio-ffmpeg (bundled ffmpeg, no system install needed), faster-whisper, deep-translator, gTTS, pyyaml, rich, pysrt, Pillow, plus FastAPI/uvicorn for the web control panel.
+This installs the media-processing dependencies, the optional Google Gen AI client, and FastAPI/uvicorn for the web control panel.
+
+To enable Gemini-assisted clip ranking, copy the environment template and put
+your Gemini API key in the local `.env` file. `.env` is ignored by Git, while
+`.env.example` is safe to commit. Do not place the key in `config.yaml`.
+
+```powershell
+Copy-Item .env.example .env
+# Edit .env and replace the placeholder:
+# GEMINI_API_KEY=your-api-key
+```
+
+The application loads the project-level `.env` automatically. A value already
+set in the operating-system environment takes priority over the file.
+
+The default model is `gemini-2.5-flash-lite`. If the key is absent, the request
+times out, or Gemini returns unusable output, the Clip Expert automatically
+keeps its original heuristic ranking.
 
 ### 1b. Web Control Panel (optional, recommended for demos)
 
@@ -150,8 +167,22 @@ The Clip Expert uses multiple strategies to find interesting moments:
 - **Content topics**: Scores candidates against Content Analyzer topics and promotes diverse relevant moments
 - **Emotion + audio energy**: Rewards moments where strong sentiment and audible energy occur together
 - **Hook score**: Ranks opening strength, emotion, audio energy, specificity, and coherence
+- **Gemini editorial review**: Optionally reviews timestamped transcript excerpts for hook, flow, value, and standalone completeness, then blends that judgement with the measurable score
 - **Silence detection**: Snaps clip boundaries to silence for clean cuts
 - **Combined** (default): Uses all strategies together
+
+Only transcript excerpts, candidate timestamps, topics, and numeric scores are
+sent to Gemini in this first integration; video files and frames are not
+uploaded. Configure or disable it in `config.yaml`:
+
+```yaml
+clip_agent:
+  gemini_review:
+    enabled: true
+    model: "gemini-2.5-flash-lite"
+    candidate_limit: 12
+    blend_weight: 0.5
+```
 
 ### Whisper Model Sizes
 
@@ -173,6 +204,7 @@ networks. The studio handles this automatically:
 | huggingface.co | Whisper model download | Blocked | Auto-routes through **hf-mirror.com**, caches under `models/whisper/` |
 | translate.google.com | Subtitle translation | Blocked | Falls back to **MyMemory** (mymemory.translated.net) |
 | gTTS (Google) | Text-to-speech | Blocked | Uses **Edge TTS** by default (`tts_engine: "edge"`) |
+| Gemini API | Optional clip editorial review | May be unavailable | Keeps the local heuristic ranking; set `gemini_review.enabled: false` to disable calls |
 
 - **Pre-download the Whisper model** (optional but recommended on first run):
 

@@ -30,6 +30,7 @@ from utils.video_utils import (
     get_audio_energy_segments,
 )
 from utils.subtitle_utils import transcribe_audio, detect_language_from_segments
+from utils.gemini_clip_reviewer import GeminiClipReviewer
 
 
 class ClipAgent(BaseAgent):
@@ -68,6 +69,11 @@ class ClipAgent(BaseAgent):
         )
         self.snap_to_silence = self.clip_config.get("snap_to_silence", True)
         self.whisper_model = config.get("subtitle_agent", {}).get("whisper_model", "base")
+        gemini_config = self.clip_config.get("gemini_review", {})
+        self.gemini_review_weight = min(
+            1.0, max(0.0, float(gemini_config.get("blend_weight", 0.5)))
+        )
+        self.gemini_reviewer = GeminiClipReviewer(config)
 
     def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -175,6 +181,11 @@ class ClipAgent(BaseAgent):
                 ),
                 "matched_topic": hl.get("matched_topic", ""),
                 "is_topic_relevant": hl.get("is_topic_relevant", False),
+                "llm_reviewed": hl.get("llm_reviewed", False),
+                "llm_editorial_score": hl.get("llm_editorial_score"),
+                "llm_score_breakdown": hl.get("llm_score_breakdown", {}),
+                "llm_reason": hl.get("llm_reason", ""),
+                "pre_llm_selection_score": hl.get("pre_llm_selection_score"),
             })
 
         self.log(f"Created {len(clips)} clips from {video_name}")
@@ -218,6 +229,9 @@ class ClipAgent(BaseAgent):
 
         # Deduplicate overlapping highlights (keep highest scoring)
         highlights = self._deduplicate_highlights(highlights)
+        highlights = self._apply_gemini_review(
+            highlights, precomputed_segments, topics, detected_lang
+        )
         highlights = self._select_topic_diverse(highlights)
 
         if not highlights and self.strategy == "combined":
@@ -227,6 +241,9 @@ class ClipAgent(BaseAgent):
             highlights = self._score_topic_relevance(highlights, topics)
             highlights = self._rank_candidates(highlights, has_topics=bool(topics))
             highlights = self._deduplicate_highlights(highlights)
+            highlights = self._apply_gemini_review(
+                highlights, precomputed_segments, topics, detected_lang
+            )
             highlights = self._select_topic_diverse(highlights)
 
         return highlights
@@ -456,6 +473,59 @@ class ClipAgent(BaseAgent):
                 "sentiment_intensity": km.get("sentiment_score", 0),
             })
 
+        return highlights
+
+    def _apply_gemini_review(
+        self,
+        highlights: List[Dict],
+        transcript_segments: List[Dict],
+        topics: List[Dict],
+        detected_language: str = "",
+    ) -> List[Dict]:
+        """Blend optional Gemini editorial judgement into candidate ranking."""
+        if not highlights:
+            return highlights
+        if not self.gemini_reviewer.available:
+            if self.gemini_reviewer.enabled:
+                self.log(
+                    f"Gemini review skipped: {self.gemini_reviewer.unavailable_reason}",
+                    "warning",
+                )
+            return highlights
+
+        try:
+            reviews = self.gemini_reviewer.review_candidates(
+                highlights,
+                transcript_segments=transcript_segments,
+                topics=topics,
+                detected_language=detected_language,
+            )
+        except Exception as exc:
+            self.log(
+                f"Gemini review unavailable; keeping heuristic ranking: {exc}",
+                "warning",
+            )
+            return highlights
+
+        for index, review in reviews.items():
+            highlight = highlights[index]
+            heuristic_score = float(highlight.get("score", 0))
+            editorial_score = float(review["editorial_score"])
+            combined_score = (
+                heuristic_score * (1.0 - self.gemini_review_weight) +
+                editorial_score * self.gemini_review_weight
+            )
+            highlight["pre_llm_selection_score"] = round(heuristic_score, 1)
+            highlight["llm_reviewed"] = True
+            highlight["llm_editorial_score"] = round(editorial_score, 1)
+            highlight["llm_score_breakdown"] = review["score_breakdown"]
+            highlight["llm_reason"] = review["reason"]
+            highlight["score"] = round(min(100.0, max(0.0, combined_score)), 1)
+            highlight["final_selection_score"] = highlight["score"]
+
+        self.log(
+            f"Gemini reviewed {len(reviews)} candidate(s) with {self.gemini_reviewer.model}"
+        )
         return highlights
 
     def _fuse_emotion_and_energy(self, highlights: List[Dict]) -> List[Dict]:
