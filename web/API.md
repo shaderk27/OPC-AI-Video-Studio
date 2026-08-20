@@ -17,7 +17,7 @@ The single source of truth for every option the UI renders. Return values **from
 ```json
 {
   "project": "OPC AI Video Studio",
-  "languages": [ {"code": "en", "name": "English"}, {"code": "zh", "name": "Chinese"}, "...20+" ],
+  "languages": [ {"code": "en", "name": "English", "subtitle_supported": true, "gemini_tts_supported": true, "edge_tts_fallback_supported": true}, "..." ],
   "formats": [
     {"platform": "TikTok", "width": 1080, "height": 1920, "aspect_ratio": "9:16"},
     {"platform": "YouTube Shorts", "width": 1080, "height": 1920, "aspect_ratio": "9:16"},
@@ -27,7 +27,7 @@ The single source of truth for every option the UI renders. Return values **from
   ],
   "whisper_models": ["tiny", "base", "small", "medium", "large-v3"],
   "detection_strategies": ["combined", "transcript", "audio_energy", "silence"],
-  "tts_engines": ["edge", "gtts"],
+  "tts_engines": ["gemini"],
   "tones": ["energetic", "casual", "professional", "educational"],
   "stages": [
     {"id": "content_analysis", "name": "Content Analyzer", "role": "Video Content Intelligence Analyst"},
@@ -41,10 +41,10 @@ The single source of truth for every option the UI renders. Return values **from
   ],
   "defaults": {
     "subtitle_languages": ["en", "zh"],
-    "subtitle_mode": "separate",          // "separate" | "burn" | "both"
+    "subtitle_mode": "both",              // "separate" | "burn" | "both"
     "subtitle_formats": ["srt", "vtt"],
     "audio_languages": ["zh"],
-    "tts_engine": "edge",
+    "localization_review_enabled": true,
     "formats": ["TikTok", "YouTube Shorts", "Instagram Reels", "YouTube", "Instagram Feed"],
     "stages": ["content_analysis", "clip", "subtitle", "audio", "thumbnail", "social_media", "format", "quality"],
     "whisper_model": "small",
@@ -86,11 +86,12 @@ Body (all fields optional; omitted → `defaults` from config):
 ```json
 {
   "video": "input/Kayaking.mp4",
+  "languages": null,                       // legacy alias used only when separate lists are absent
   "subtitle_languages": ["en", "zh"],
-  "subtitle_mode": "separate",          // "separate" | "burn" | "both"
+  "subtitle_mode": "both",              // "separate" | "burn" | "both"
   "subtitle_formats": ["srt", "vtt"],
   "audio_languages": ["zh"],
-  "tts_engine": "edge",
+  "localization_review_enabled": true,
   "formats": ["TikTok", "YouTube Shorts", "Instagram Reels"],
   "stages": ["content_analysis", "clip", "subtitle", "audio", "thumbnail", "social_media", "format", "quality"],
   "whisper_model": "small",
@@ -127,6 +128,12 @@ Response: `{ "run_id": "20260818-1455-abc123" }` (server starts the pipeline in 
 | `stage_failed` | `{stage, ok: false, error}` |
 | `review_ready` | `{count}` (pipeline pauses immediately after Clip Expert) |
 | `review_completed` | `{approved, rejected}` (downstream processing resumes) |
+| `subtitle_plan_ready` | `{count}` (legacy event; subtitles now render automatically) |
+| `audio_plan_ready` | `{count}` |
+| `localization_review_ready` | `{count}` (pipeline pauses before rendering) |
+| `localization_review_completed` | `{approved}` |
+| `tts_fallback_used` | `{clip, language, provider}` |
+| `audio_separation_warning` | `{clip, warning}` |
 | `run_completed` | `{run_id, elapsed, manifest, clips, quality}` |
 | `run_failed` | `{run_id, error}` |
 | `ping` | `{}` every 15 s (keep-alive) |
@@ -142,7 +149,7 @@ status snapshot's `error` field.
 ## 6. `GET /api/runs/{run_id}` — status snapshot (poll fallback)
 
 ```json
-{ "run_id": "...", "status": "running|awaiting_review|completed|failed", "elapsed": 42.0,
+{ "run_id": "...", "status": "running|awaiting_review|awaiting_localization_review|completed|failed", "elapsed": 42.0,
   "error": "",
   "stages": [ {"stage": "clip", "status": "active|done|failed|pending", "elapsed": 3.2} ],
   "clips_count": 5 }
@@ -167,11 +174,21 @@ thumbnail, social-media, format, and quality agents do not run until this
 endpoint is called. An empty list ends the run without downstream processing.
 The final decisions are saved as `review_decisions.json` in that run's folder.
 
-## 8. Results
+## 8. Localization approval metadata
+
+Gemini creates the subtitle and dubbing plans, and both are automatically
+approved after schema and timing validation. The run does not enter
+`awaiting_localization_review`; the legacy localization-review endpoints remain
+only for compatibility with older stored runs. Whisper remains authoritative
+for cue timing.
+
+## 9. Results
 
 - `GET /api/runs/{run_id}/manifest` → that run's `manifest.json` content
 - `GET /api/runs/{run_id}/quality` → that run's `quality_report.json` content
-- `GET /api/runs/{run_id}/downloads` → list of ready-to-download artifacts
+- `GET /api/runs/{run_id}/downloads` → ready-to-download intermediate and
+  final delivery artifacts. Gallery playback uses only `final`; source,
+  formatted, dubbed, and subtitle files remain downloads/diagnostics.
 
 Every processing attempt is isolated under
 `output/YYYY-MM-DD/HH-MM-SS_video-name_run-id/`. Reprocessing a video therefore
@@ -182,6 +199,7 @@ does not overwrite an earlier manifest, report, clip, or caption.
   "subtitles": [{"filename": "...", "url": "/output/2026-08-19/14-32-08_video_a3f1/subtitles/...srt", "lang": "zh"}],
   "formatted": [{"platform": "TikTok", "url": "/output/2026-08-19/14-32-08_video_a3f1/formatted/..._1080x1920.mp4"}],
   "burned": [{"lang": "en", "url": "/output/2026-08-19/14-32-08_video_a3f1/burned/...mp4"}],
+  "final": [{"clip_index": 1, "platform": "TikTok", "aspect_ratio": "9:16", "audio_language": "zh", "subtitle_language": "zh", "url": "/output/2026-08-19/14-32-08_video_a3f1/final/...mp4"}],
   "thumbnails": ["/output/2026-08-19/14-32-08_video_a3f1/thumbnails/...png"],
   "social": ["/output/2026-08-19/14-32-08_video_a3f1/social/...json"] }
 ```
@@ -191,5 +209,7 @@ does not overwrite an earlier manifest, report, clip, or caption.
 - Serve `web/` at `/` and `output/` at `/output` (StaticFiles). SSE via `StreamingResponse`.
 - Runs registry: keep `{run_id: RunState}` in memory (a dict + lock) — the demo is single-user.
 - Add `on_stage(stage, status, message)` callback support to `run_studio()` (already added in `main.py`) so the server can emit `stage_*` events.
-- `subtitle_mode: "burn"` → after the pipeline, burn the chosen subtitle language into copies under `output/burned/` (ffmpeg `subtitles` filter, font fallback chain `msyh.ttc → simhei.ttf → arial.ttf`). Best-effort: failures surface as `stage_log` warnings, never crash the run.
+- After the pipeline, compose each delivery video in this order: selected
+  dubbed audio → selected platform render → selected burned subtitle. Save it
+  under `output/final/` and record it in `manifest.final_videos`.
 - Review decisions live in `runs/{run_id}_decisions.json`; the gallery applies them (dropped clips hidden).

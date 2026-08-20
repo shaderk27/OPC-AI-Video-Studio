@@ -3,6 +3,7 @@ output/
 
 # ── Downloaded AI models (re-downloadable: python scripts/setup_whisper_model.py) ──
 models/whisper/
+models/audio-separator/
 
 # ── Raw input footage (videos are large; don't commit) ──
 # Remove this line if you want to track sample videos in the repo.

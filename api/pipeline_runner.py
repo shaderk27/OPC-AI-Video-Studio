@@ -59,6 +59,8 @@ class RunState:
         # Review gate
         self.review_clips: List[Dict] = []
         self._review_event = threading.Event()
+        self.localization_review: Dict[str, Any] = {"items": [], "count": 0}
+        self._localization_event = threading.Event()
         self._manager: Optional[ManagerAgent] = None
 
 
@@ -120,6 +122,7 @@ class PipelineRunner:
                 config=state.config,
                 progress_callback=progress_callback,
                 review_gate=state._review_event,
+                localization_review_gate=state._localization_event,
             )
             state._manager = manager
             state.run_id = run_id  # sync the manager's run_id
@@ -181,6 +184,10 @@ class PipelineRunner:
             state.status = "awaiting_review"
             state.review_clips = data.get("clips", [])
 
+        elif event_type == "localization_review_ready":
+            state.status = "awaiting_localization_review"
+            state.localization_review = data
+
         elif event_type == "pipeline_complete":
             state.status = "complete"
 
@@ -221,6 +228,11 @@ class PipelineRunner:
             return "Pipeline running"
         elif state.status == "awaiting_review":
             return f"Waiting for clip review ({len(state.review_clips)} clips)"
+        elif state.status == "awaiting_localization_review":
+            return (
+                "Waiting for subtitle/audio review "
+                f"({len(state.localization_review.get('items', []))} items)"
+            )
         elif state.status == "complete":
             return f"Complete — {state.clips_count} clips generated"
         elif state.status == "error":
@@ -343,6 +355,42 @@ class PipelineRunner:
             "status": "resumed",
             "approved_count": len(approved_clips),
             "message": "Pipeline resumed",
+        }
+
+    def approve_localization(
+        self,
+        run_id: str,
+        payload: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        state = self._runs.get(run_id)
+        if not state:
+            return None
+        if state.status != "awaiting_localization_review":
+            return {"error": f"Run is not awaiting localization review (status: {state.status})"}
+        if not isinstance(payload.get("items"), list):
+            return {"error": "items must be a list"}
+        expected = {
+            (item.get("clip_index"), item.get("language"))
+            for item in state.localization_review.get("items", [])
+        }
+        received = {
+            (item.get("clip_index"), item.get("language"))
+            for item in payload["items"] if isinstance(item, dict)
+        }
+        if expected != received or len(payload["items"]) != len(expected):
+            return {"error": "Every localization item must be submitted exactly once"}
+        decision_path = Path(state.output_dir) / "localization_review_decisions.json"
+        with decision_path.open("w", encoding="utf-8") as stream:
+            json.dump(payload, stream, indent=2, ensure_ascii=False)
+        if state._manager:
+            state._manager.set_approved_localization(payload)
+        state.status = "running"
+        return {
+            "run_id": run_id,
+            "status": "resumed",
+            "approved_count": sum(
+                bool(item.get("approved")) for item in payload.get("items", [])
+            ),
         }
 
     # ─────────────────────────────────────────────────────────────────────

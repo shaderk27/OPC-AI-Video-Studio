@@ -42,6 +42,8 @@ from api.models import (
     ClipsResponse,
     ErrorResponse,
     ExportResponse,
+    LocalizationReviewRequest,
+    LocalizationReviewResponse,
     RunRequest,
     RunResponse,
     RunStatus,
@@ -160,15 +162,61 @@ async def run_pipeline(request: RunRequest):
     # Load config and apply overrides
     config = load_config()
 
-    if request.languages:
-        config.setdefault("subtitle_agent", {})["target_languages"] = request.languages
-        config.setdefault("audio_agent", {})["target_languages"] = request.languages
+    subtitle_languages = request.subtitle_languages or request.languages
+    audio_languages = request.audio_languages or request.languages
+    supported_languages = {
+        "en", "zh", "es", "fr", "de", "ja", "ko", "ar",
+        "hi", "pt", "ru", "it", "tr", "vi", "th", "id",
+    }
+    invalid_languages = sorted({
+        str(code)
+        for code in [*(subtitle_languages or []), *(audio_languages or [])]
+        if code not in supported_languages
+    })
+    if invalid_languages:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported language code(s): " + ", ".join(invalid_languages),
+        )
+    if request.skip_stages and "subtitle" in request.skip_stages and "audio" not in request.skip_stages:
+        raise HTTPException(
+            status_code=400,
+            detail="Audio Expert requires Subtitle Expert for its structured handoff.",
+        )
+    if subtitle_languages:
+        config.setdefault("subtitle_agent", {})["target_languages"] = subtitle_languages
+    if audio_languages:
+        config.setdefault("audio_agent", {})["target_languages"] = audio_languages
 
     if request.max_clips:
         config.setdefault("clip_agent", {})["max_clips"] = request.max_clips
 
     if request.review_gate_enabled is not None:
         config.setdefault("manager_agent", {})["review_gate_enabled"] = request.review_gate_enabled
+    config.setdefault("manager_agent", {})["localization_review_enabled"] = (
+        request.localization_review_enabled
+    )
+
+    localization_selected = not (
+        request.skip_stages
+        and {"subtitle", "audio"}.issubset(set(request.skip_stages))
+    )
+    if localization_selected:
+        from agents.subtitle_agent import SubtitleAgent
+        from agents.audio_agent import AudioAgent
+
+        localization_error = (
+            SubtitleAgent(config).gemini.configuration_error() or
+            AudioAgent(config).gemini.configuration_error()
+        )
+        if localization_error:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Gemini localization experts are required but not configured: "
+                    + localization_error
+                ),
+            )
 
     gemini_review = config.setdefault("clip_agent", {}).setdefault("gemini_review", {})
     gemini_review["required"] = request.gemini_required
@@ -185,6 +233,12 @@ async def run_pipeline(request: RunRequest):
                 detail="Require Gemini API also requires Content Analyzer and Clip Expert.",
             )
         gemini_review["enabled"] = True
+        config.setdefault("subtitle_agent", {}).setdefault("gemini", {}).update(
+            {"enabled": True, "required": True}
+        )
+        config.setdefault("audio_agent", {}).setdefault("gemini", {}).update(
+            {"enabled": True, "required": True}
+        )
         content_gemini["enabled"] = True
         from utils.gemini_clip_reviewer import GeminiClipReviewer
         from utils.gemini_content_analyzer import GeminiContentAnalyzer
@@ -431,6 +485,26 @@ async def approve_clips(run_id: str, request: ApproveRequest):
     )
 
 
+@app.get("/localization/{run_id}")
+async def get_localization_review(run_id: str):
+    if not runner.run_exists(run_id):
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+    state = runner._runs[run_id]
+    if state.status != "awaiting_localization_review":
+        raise HTTPException(status_code=409, detail="Run is not awaiting localization review")
+    return state.localization_review
+
+
+@app.post("/localization/{run_id}", response_model=LocalizationReviewResponse)
+async def approve_localization(run_id: str, request: LocalizationReviewRequest):
+    result = runner.approve_localization(run_id, request.model_dump())
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+    if "error" in result:
+        raise HTTPException(status_code=409, detail=result["error"])
+    return LocalizationReviewResponse(**result)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Export
 # ─────────────────────────────────────────────────────────────────────────────
@@ -490,8 +564,10 @@ async def get_architecture():
         "agents": agents,
         "pipeline": [
             "content_analysis", "clip",
-            "[HUMAN REVIEW GATE]",
-            "subtitle", "audio", "thumbnail",
+            "[HUMAN CLIP REVIEW GATE]",
+            "subtitle_plan", "audio_plan",
+            "[HUMAN LOCALIZATION REVIEW GATE]",
+            "subtitle_render", "audio_render", "thumbnail",
             "social_media", "format", "quality",
         ],
     }

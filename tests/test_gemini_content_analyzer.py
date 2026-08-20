@@ -52,7 +52,10 @@ class _Models:
 
     def generate_content(self, **kwargs):
         self.calls.append(kwargs)
-        return SimpleNamespace(parsed=self.responses.pop(0), text="")
+        result = self.responses.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return SimpleNamespace(parsed=result, text="")
 
     def get(self, **kwargs):
         self.calls.append(kwargs)
@@ -183,6 +186,73 @@ class GeminiContentAnalyzerTests(unittest.TestCase):
 
         self.assertEqual(len(result["chapters"]), 1)
         self.assertEqual(result["chapters"][0]["title"], "Valid")
+
+    @patch("utils.gemini_content_analyzer.time.sleep")
+    def test_retries_transient_dns_failure_then_succeeds(self, sleep):
+        client = _Client([
+            OSError(11001, "getaddrinfo failed"),
+            _analysis(),
+        ])
+        analyzer = GeminiContentAnalyzer(
+            _config(transport_retries=2), client=client
+        )
+
+        result = analyzer.analyze(
+            [{"start": 0, "end": 20, "text": "A goal is scored."}],
+            30,
+            "en",
+            [],
+            "",
+        )
+
+        self.assertEqual(result["content_type"], "sports")
+        self.assertEqual(len(client.models.calls), 2)
+        sleep.assert_called_once_with(1.0)
+
+    @patch("utils.gemini_content_analyzer.time.sleep")
+    def test_exhausted_dns_retries_report_actionable_error(self, sleep):
+        client = _Client([
+            OSError(11001, "getaddrinfo failed"),
+            OSError(11001, "getaddrinfo failed"),
+            OSError(11001, "getaddrinfo failed"),
+        ])
+        analyzer = GeminiContentAnalyzer(
+            _config(transport_retries=2), client=client
+        )
+
+        with self.assertRaisesRegex(
+            GeminiContentAnalysisError,
+            "after 3 attempts.*generativelanguage.googleapis.com",
+        ):
+            analyzer.analyze(
+                [{"start": 0, "end": 20, "text": "A goal is scored."}],
+                30,
+                "en",
+                [],
+                "",
+            )
+
+        self.assertEqual(len(client.models.calls), 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    @patch("utils.gemini_content_analyzer.time.sleep")
+    def test_does_not_retry_non_transport_api_error(self, sleep):
+        client = _Client([RuntimeError("API key not valid")])
+        analyzer = GeminiContentAnalyzer(
+            _config(transport_retries=2), client=client
+        )
+
+        with self.assertRaisesRegex(GeminiContentAnalysisError, "API key not valid"):
+            analyzer.analyze(
+                [{"start": 0, "end": 20, "text": "A goal is scored."}],
+                30,
+                "en",
+                [],
+                "",
+            )
+
+        self.assertEqual(len(client.models.calls), 1)
+        sleep.assert_not_called()
 
     def test_required_agent_mode_propagates_analysis_failure(self):
         agent = ContentAnalyzerAgent(_config())

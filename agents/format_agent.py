@@ -14,11 +14,32 @@ three identical ones).
 """
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from agents.base_agent import BaseAgent
 from utils.video_utils import resize_video
+
+
+def parse_aspect_ratio(value: Any) -> Tuple[int, int]:
+    """Parse common ratio forms without guessing ambiguous numeric values."""
+    if isinstance(value, (tuple, list)) and len(value) == 2:
+        parts = value
+    elif isinstance(value, str):
+        match = re.fullmatch(r"\s*(\d+)\s*[:xX/]\s*(\d+)\s*", value)
+        if not match:
+            raise ValueError(f"Invalid aspect ratio: {value!r}")
+        parts = match.groups()
+    else:
+        raise ValueError(f"Invalid aspect ratio: {value!r}")
+    try:
+        width_ratio, height_ratio = (int(parts[0]), int(parts[1]))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid aspect ratio: {value!r}") from exc
+    if width_ratio <= 0 or height_ratio <= 0:
+        raise ValueError(f"Aspect-ratio values must be positive: {value!r}")
+    return width_ratio, height_ratio
 
 
 class FormatAgent(BaseAgent):
@@ -48,7 +69,23 @@ class FormatAgent(BaseAgent):
             if key[0] <= 0 or key[1] <= 0:
                 self.log(f"  SKIP invalid format {fmt.get('platform')}: bad dimensions", "warning")
                 continue
-            groups.setdefault(key, []).append(fmt)
+            try:
+                ratio = parse_aspect_ratio(
+                    fmt.get("aspect_ratio") or (key[0], key[1])
+                )
+            except ValueError as exc:
+                self.log(f"  SKIP invalid format {fmt.get('platform')}: {exc}", "warning")
+                continue
+            if abs((key[0] / key[1]) - (ratio[0] / ratio[1])) > 0.02:
+                self.log(
+                    f"  SKIP invalid format {fmt.get('platform')}: "
+                    "dimensions do not match aspect ratio",
+                    "warning",
+                )
+                continue
+            normalized = dict(fmt)
+            normalized["aspect_ratio"] = f"{ratio[0]}:{ratio[1]}"
+            groups.setdefault(key, []).append(normalized)
         return groups
 
     def _render_group(

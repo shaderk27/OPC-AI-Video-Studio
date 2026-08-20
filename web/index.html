@@ -98,7 +98,7 @@
           <div id="audio-langs" class="chips"></div>
           <label class="field-label">TTS engine</label>
           <select id="tts-engine" class="input"></select>
-          <p class="micro-hint">Edge TTS works in mainland China; gTTS is the Google fallback.</p>
+          <p class="micro-hint">Gemini is primary; Edge TTS is used automatically and visibly if a cue fails.</p>
         </div>
 
         <!-- Formats -->
@@ -177,7 +177,7 @@
               <span class="switch-track" aria-hidden="true"><span></span></span>
               <span class="switch-copy">
                 <strong>Require Gemini API</strong>
-                <small>Require Gemini transcript analysis and candidate-video review; stop and display an error if either fails.</small>
+                <small>Require Gemini analysis, clip review, subtitle planning, and dubbing planning; stop with an explicit error if an expert fails.</small>
               </span>
             </label>
             <label class="field-label">Agents to run</label>
@@ -219,16 +219,23 @@
     <div class="card">
       <div class="card-head">
         <div>
-          <h2>3 · Approve clips before processing</h2>
-          <p class="sub">Only approved clips continue to subtitles, voiceover, thumbnails, captions, and formatting.</p>
+          <h2 id="review-title">3 · Approve clips before processing</h2>
+          <p id="review-subtitle" class="sub">Only approved clips continue to subtitles, voiceover, thumbnails, captions, and formatting.</p>
         </div>
-        <div class="review-actions">
+        <div id="clip-review-actions" class="review-actions">
           <button id="review-approve-all" class="btn btn-ghost">Approve all</button>
           <button id="review-drop-all" class="btn btn-ghost">Drop all</button>
           <button id="review-next" class="btn btn-primary" disabled>Review every clip to continue</button>
         </div>
       </div>
       <div id="review-grid" class="review-grid"><div class="muted">Loading…</div></div>
+      <div id="localization-review-panel" class="localization-review hidden">
+        <div id="localization-review-grid" class="localization-review-grid"><div class="muted">Loading localization plans…</div></div>
+        <div class="localization-actions">
+          <button id="localization-approve-all" class="btn btn-ghost">Approve all languages</button>
+          <button id="localization-next" class="btn btn-primary">Render approved voiceover →</button>
+        </div>
+      </div>
     </div>
   </section>
 
