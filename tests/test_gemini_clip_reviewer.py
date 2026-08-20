@@ -220,7 +220,7 @@ class GeminiClipReviewerTests(unittest.TestCase):
         self.assertEqual(client.files.deleted, ["files/1"])
         call = client.models.calls[0]
         self.assertEqual(call["model"], "gemini-3.5-flash-lite")
-        self.assertNotIn("temperature", call["config"])
+        self.assertEqual(call["config"]["temperature"], 0)
         self.assertIn(client.files.uploaded[0], call["contents"])
 
 

@@ -61,8 +61,10 @@ clip_agent:
   # Minimum and maximum clip duration in seconds
   min_clip_duration: 15
   max_clip_duration: 60
-  # Number of highlight clips to extract
+  # Target number of highlight clips to extract. The studio may return fewer
+  # only when not enough candidates meet the minimum visual quality floor.
   max_clips: 5
+  min_clips: 3
   # Highlight detection strategy:
   #   "transcript"  - Analyze transcript for key moments (keyword density, sentiment shifts, topic changes)
   #   "audio_energy" - Detect high-energy moments in audio (cheers, laughter, applause)
@@ -117,6 +119,9 @@ clip_agent:
     video_candidate_limit: 10
     video_context_seconds: 4.0
     video_min_score: 60
+    # Borderline candidates above this score may fill empty target slots even
+    # when Gemini's boolean accept decision varies between otherwise similar runs.
+    video_backfill_min_score: 45
     video_blend_weight: 0.8
     video_processing_timeout_seconds: 180
   # Ensure clips start/end at silence boundaries for clean cuts

@@ -388,7 +388,7 @@ function updateRunSummary() {
     `subs: ${[...state.subLangs].join("+")}${state.subtitleMode === "burn" ? " (burned)" : state.subtitleMode === "both" ? " (+burned)" : ""}`,
     state.audioLangs.size ? `dub: ${[...state.audioLangs].join("+")}` : "no dubbing",
     `formats: ${state.formats.size}`,
-    `clips ≤ ${$("#adv-max-clips").value || state.config.defaults.max_clips}`,
+    `target clips: ${$("#adv-max-clips").value || state.config.defaults.max_clips}`,
     $("#adv-gemini-required").checked ? "Gemini required" : "Gemini optional",
   ];
   $("#run-summary").textContent = parts.join("  ·  ");

@@ -165,6 +165,7 @@ class GeminiClipReviewer:
                 config={
                     "response_mime_type": "application/json",
                     "response_json_schema": REVIEW_SCHEMA,
+                    "temperature": 0,
                 },
             )
         except Exception as exc:
@@ -219,6 +220,7 @@ class GeminiClipReviewer:
                 config={
                     "response_mime_type": "application/json",
                     "response_json_schema": VIDEO_REVIEW_SCHEMA,
+                    "temperature": 0,
                 },
             )
             parsed = getattr(response, "parsed", None)

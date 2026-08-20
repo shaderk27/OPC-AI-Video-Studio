@@ -49,6 +49,10 @@ class ClipAgent(BaseAgent):
         self.min_duration = self.clip_config.get("min_clip_duration", 15)
         self.max_duration = self.clip_config.get("max_clip_duration", 60)
         self.max_clips = self.clip_config.get("max_clips", 5)
+        self.min_clips = min(
+            self.max_clips,
+            max(1, int(self.clip_config.get("min_clips", 3))),
+        )
         self.strategy = self.clip_config.get("detection_strategy", "combined")
         self.keywords = self.clip_config.get("highlight_keywords", [])
         self.padding_before = self.clip_config.get("padding_before", 1.5)
@@ -99,10 +103,15 @@ class ClipAgent(BaseAgent):
         self.gemini_video_min_score = min(
             100.0, max(0.0, float(gemini_config.get("video_min_score", 60.0)))
         )
+        self.gemini_video_backfill_min_score = min(
+            self.gemini_video_min_score,
+            max(0.0, float(gemini_config.get("video_backfill_min_score", 45.0))),
+        )
         self.gemini_video_review_weight = min(
             1.0, max(0.0, float(gemini_config.get("video_blend_weight", 0.8)))
         )
         self.gemini_reviewer = GeminiClipReviewer(config)
+        self.selection_funnel: Dict[str, Any] = {}
         if self.gemini_review_required:
             self.gemini_reviewer.enabled = True
             self.gemini_video_review_enabled = True
@@ -119,6 +128,10 @@ class ClipAgent(BaseAgent):
         """
         video_path = input_data["video_path"]
         video_name = input_data.get("video_name", Path(video_path).stem)
+        self.selection_funnel = {
+            "target_clips": self.max_clips,
+            "minimum_clips": self.min_clips,
+        }
 
         # Check if Content Analyzer already ran
         content_analysis = input_data.get("content_analysis")
@@ -155,6 +168,12 @@ class ClipAgent(BaseAgent):
         if not highlights:
             self.log("No highlights detected. Creating evenly-spaced clips as fallback.")
             highlights = self._fallback_even_clips(total_duration)
+            self.selection_funnel.update({
+                "generated": len(highlights),
+                "deduplicated": len(highlights),
+                "shortlisted": len(highlights),
+                "used_evenly_spaced_fallback": True,
+            })
 
         # Step 3: Protect the payoff/reaction after each detected moment.
         highlights = self._extend_for_completion(
@@ -173,6 +192,24 @@ class ClipAgent(BaseAgent):
         # weak candidates or refine their boundaries using the proxy context.
         highlights = self._apply_gemini_video_review(
             video_path, highlights, total_duration
+        )
+        self.selection_funnel["selected"] = min(
+            len(highlights), self.max_clips
+        )
+        visual_summary = "visual review skipped"
+        if "video_reviewed" in self.selection_funnel:
+            visual_summary = (
+                f"strictly accepted "
+                f"{self.selection_funnel.get('strictly_accepted', 0)} + "
+                f"backfilled {self.selection_funnel.get('backfilled', 0)}"
+            )
+        self.log(
+            "Candidate funnel: "
+            f"generated {self.selection_funnel.get('generated', 0)} -> "
+            f"deduplicated {self.selection_funnel.get('deduplicated', 0)} -> "
+            f"shortlisted {self.selection_funnel.get('shortlisted', len(highlights))} -> "
+            f"{visual_summary} -> selected "
+            f"{self.selection_funnel['selected']}/{self.max_clips}"
         )
 
         # Step 7: Cut the clips
@@ -227,6 +264,9 @@ class ClipAgent(BaseAgent):
                 "pre_llm_selection_score": hl.get("pre_llm_selection_score"),
                 "gemini_video_reviewed": hl.get("gemini_video_reviewed", False),
                 "gemini_video_accepted": hl.get("gemini_video_accepted"),
+                "gemini_video_backfilled": hl.get(
+                    "gemini_video_backfilled", False
+                ),
                 "gemini_video_score": hl.get("gemini_video_score"),
                 "gemini_video_score_breakdown": hl.get(
                     "gemini_video_score_breakdown", {}
@@ -238,8 +278,10 @@ class ClipAgent(BaseAgent):
             })
 
         self.log(f"Created {len(clips)} clips from {video_name}")
+        self.selection_funnel["created"] = len(clips)
         return {
             "clips": clips,
+            "clip_selection_funnel": dict(self.selection_funnel),
             "video_info": video_info,
             "video_name": video_name,
             "content_analysis": content_analysis,
@@ -275,13 +317,16 @@ class ClipAgent(BaseAgent):
         highlights = self._score_hooks(highlights)
         highlights = self._score_topic_relevance(highlights, topics)
         highlights = self._rank_candidates(highlights, has_topics=bool(topics))
+        self.selection_funnel["generated"] = len(highlights)
 
         # Deduplicate overlapping highlights (keep highest scoring)
         highlights = self._deduplicate_highlights(highlights)
+        self.selection_funnel["deduplicated"] = len(highlights)
         highlights = self._apply_gemini_review(
             highlights, precomputed_segments, topics, detected_lang
         )
         highlights = self._select_topic_diverse(highlights)
+        self.selection_funnel["shortlisted"] = len(highlights)
 
         if not highlights and self.strategy == "combined":
             # If combined found nothing, try energy-only as last resort
@@ -294,6 +339,11 @@ class ClipAgent(BaseAgent):
                 highlights, precomputed_segments, topics, detected_lang
             )
             highlights = self._select_topic_diverse(highlights)
+            self.selection_funnel.update({
+                "generated": len(highlights),
+                "deduplicated": len(highlights),
+                "shortlisted": len(highlights),
+            })
 
         return highlights
 
@@ -665,7 +715,8 @@ class ClipAgent(BaseAgent):
             )
             return highlights
 
-        accepted = []
+        strictly_accepted = []
+        backfill_pool = []
         for index, review in reviews.items():
             highlight = candidates[index]
             visual_score = float(review["visual_editorial_score"])
@@ -678,9 +729,59 @@ class ClipAgent(BaseAgent):
             highlight["gemini_video_score_breakdown"] = review["score_breakdown"]
             highlight["gemini_event_type"] = review["event_type"]
             highlight["gemini_video_reason"] = review["reason"]
-            if not is_accepted:
-                continue
+            prior_score = float(highlight.get("score", 0))
+            highlight["score"] = round(
+                prior_score * (1.0 - self.gemini_video_review_weight) +
+                visual_score * self.gemini_video_review_weight,
+                1,
+            )
+            highlight["final_selection_score"] = highlight["score"]
+            highlight["gemini_video_backfilled"] = False
+            if is_accepted:
+                strictly_accepted.append((index, highlight, review))
+            elif visual_score >= self.gemini_video_backfill_min_score:
+                backfill_pool.append((index, highlight, review))
 
+        rank_key = lambda item: (
+            -float(item[1].get("score", 0)),
+            float(item[1].get("start", 0)),
+            float(item[1].get("end", 0)),
+            str(item[1].get("title", "")),
+        )
+        strictly_accepted.sort(key=rank_key)
+        backfill_pool.sort(key=rank_key)
+        target_count = min(self.max_clips, len(candidates))
+        selected = strictly_accepted[:target_count]
+        needed = target_count - len(selected)
+        if needed > 0:
+            additions = backfill_pool[:needed]
+            for _, highlight, _ in additions:
+                highlight["gemini_video_backfilled"] = True
+            selected.extend(additions)
+        selected.sort(key=rank_key)
+
+        self.selection_funnel.update({
+            "video_reviewed": len(reviews),
+            "strictly_accepted": len(strictly_accepted),
+            "backfill_eligible": len(backfill_pool),
+            "backfilled": sum(
+                1 for _, highlight, _ in selected
+                if highlight.get("gemini_video_backfilled")
+            ),
+        })
+
+        if not selected:
+            message = (
+                "Gemini inspected the candidate videos but rejected all of them "
+                "as unsuitable or below the backfill quality threshold."
+            )
+            if self.gemini_review_required:
+                raise GeminiRequiredError(message)
+            self.log(f"{message} Keeping the transcript-ranked candidates.", "warning")
+            return highlights
+
+        finalized = []
+        for index, highlight, review in selected:
             review_candidate = review_candidates[index]
             highlight["pre_gemini_video_start"] = round(highlight["start"], 3)
             highlight["pre_gemini_video_end"] = round(highlight["end"], 3)
@@ -695,31 +796,21 @@ class ClipAgent(BaseAgent):
             highlight["start"], highlight["end"] = self._clamp_reviewed_boundaries(
                 suggested_start, suggested_end, total_duration
             )
-            prior_score = float(highlight.get("score", 0))
-            highlight["score"] = round(
-                prior_score * (1.0 - self.gemini_video_review_weight) +
-                visual_score * self.gemini_video_review_weight,
-                1,
-            )
-            highlight["final_selection_score"] = highlight["score"]
-            accepted.append(highlight)
+            finalized.append(highlight)
 
-        if not accepted:
-            message = (
-                "Gemini inspected the candidate videos but rejected all of them "
-                "as unsuitable or below the visual quality threshold."
+        if len(finalized) < min(self.min_clips, target_count):
+            self.log(
+                f"Only {len(finalized)} candidate(s) met the visual quality floor; "
+                f"the configured minimum is {min(self.min_clips, target_count)}.",
+                "warning",
             )
-            if self.gemini_review_required:
-                raise GeminiRequiredError(message)
-            self.log(f"{message} Keeping the transcript-ranked candidates.", "warning")
-            return highlights
-
-        accepted.sort(key=lambda item: item["score"], reverse=True)
         self.log(
-            f"Gemini visually accepted {len(accepted)}/{len(candidates)} "
-            f"candidate(s) with {self.gemini_reviewer.model}"
+            f"Gemini selected {len(finalized)}/{len(candidates)} candidate(s): "
+            f"{min(len(strictly_accepted), target_count)} strict, "
+            f"{self.selection_funnel['backfilled']} quality backfill(s) "
+            f"with {self.gemini_reviewer.model}"
         )
-        return accepted
+        return finalized
 
     def _clamp_reviewed_boundaries(
         self,

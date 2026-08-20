@@ -18,7 +18,7 @@ Usage:
     Options:
         --config <path>      Path to config file (default: config.yaml)
         --languages <codes>  Comma-separated target language codes (e.g., en,zh,es)
-        --max-clips <n>      Maximum number of clips to generate
+        --max-clips <n>      Target number of clips to generate
         --skip <stages>      Comma-separated stages to skip (e.g., thumbnail,quality)
         --output <dir>       Output archive root (default: output/)
 
@@ -357,9 +357,13 @@ def save_manifest(pipeline_data: dict, results: dict, elapsed: float, config: di
         "config": {
             "target_languages": config.get("subtitle_agent", {}).get("target_languages", []),
             "max_clips": config.get("clip_agent", {}).get("max_clips", 5),
-            "whisper_model": config.get("subtitle_agent", {}).get("whisper_model", "base"),
+            "min_clips": config.get("clip_agent", {}).get("min_clips", 3),
+            "whisper_model": config.get("subtitle_agent", {}).get("whisper_model", "small"),
         },
         "content_analysis": {},
+        "clip_selection_funnel": pipeline_data.get(
+            "clip_selection_funnel", {}
+        ),
         "clips": [],
     }
 
@@ -401,6 +405,9 @@ def save_manifest(pipeline_data: dict, results: dict, elapsed: float, config: di
             "selection_score": clip.get("selection_score", 0),
             "gemini_video_reviewed": clip.get("gemini_video_reviewed", False),
             "gemini_video_accepted": clip.get("gemini_video_accepted"),
+            "gemini_video_backfilled": clip.get(
+                "gemini_video_backfilled", False
+            ),
             "gemini_video_score": clip.get("gemini_video_score"),
             "gemini_video_score_breakdown": clip.get(
                 "gemini_video_score_breakdown", {}
@@ -470,7 +477,7 @@ Examples:
     parser.add_argument("video_path", help="Path to the input video file")
     parser.add_argument("--config", default="config.yaml", help="Path to config file")
     parser.add_argument("--languages", help="Comma-separated target languages (e.g., en,zh,es)")
-    parser.add_argument("--max-clips", type=int, help="Maximum number of clips to generate")
+    parser.add_argument("--max-clips", type=int, help="Target number of clips to generate")
     parser.add_argument("--skip", help="Comma-separated stages to skip")
     parser.add_argument("--output", help="Output archive root override")
 

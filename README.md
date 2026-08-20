@@ -175,13 +175,15 @@ The Clip Expert uses multiple strategies to find interesting moments:
 When Gemini is enabled, the Content Analyzer sends the timestamped transcript
 for semantic analysis. Clip review sends transcript excerpts, timestamps, topics,
 scores, and lightweight temporary candidate-video proxies. The full source video
-is not uploaded. Proxies
-include surrounding context so Gemini can reject weak candidates or improve
+is not uploaded. Proxies include surrounding context so Gemini can reject weak
+candidates or improve
 their boundaries. Local and Gemini-hosted temporary files are deleted after
 review. Configure or disable it in `config.yaml`:
 
 ```yaml
 clip_agent:
+  max_clips: 5       # target count
+  min_clips: 3       # warn when fewer viable candidates remain
   gemini_review:
     enabled: true
     required: true
@@ -192,8 +194,17 @@ clip_agent:
     video_candidate_limit: 10
     video_context_seconds: 4.0
     video_min_score: 60
+    video_backfill_min_score: 45
     video_blend_weight: 0.8
 ```
+
+To keep the output count stable, the Clip Expert over-generates candidates and
+targets `max_clips` after review. Candidates accepted by Gemini with a score of
+at least `video_min_score` are selected first. Empty target slots may be filled
+by the strongest candidates scoring at least `video_backfill_min_score`, even
+when Gemini's boolean accept/reject decision varies. Candidates below the
+backfill floor remain excluded, so a weak source video can still produce fewer
+than the target. The run manifest records the complete candidate funnel.
 
 **Require Gemini API** is enabled by default in the web control panel. Gemini
 transcript analysis and candidate-video review are mandatory unless you

@@ -182,6 +182,7 @@ class GeminiContentAnalyzer:
                     config={
                         "response_mime_type": "application/json",
                         "response_json_schema": CONTENT_ANALYSIS_SCHEMA,
+                        "temperature": 0,
                     },
                 )
             except Exception as exc:

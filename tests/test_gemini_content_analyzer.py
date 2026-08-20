@@ -92,7 +92,7 @@ class GeminiContentAnalyzerTests(unittest.TestCase):
         self.assertEqual(result["key_moments"][0]["combined_score"], 85.0)
         self.assertEqual(result["corrected_terms"][0]["corrected"], "Messi")
         self.assertIn("timestamped transcript", client.models.calls[0]["contents"])
-        self.assertNotIn("temperature", client.models.calls[0]["config"])
+        self.assertEqual(client.models.calls[0]["config"]["temperature"], 0)
 
     def test_chunks_long_transcript_and_merges_topics(self):
         segments = [

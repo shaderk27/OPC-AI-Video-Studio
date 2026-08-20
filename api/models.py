@@ -31,7 +31,7 @@ class RunRequest(BaseModel):
         None, description="Target languages (e.g., ['en', 'zh'])"
     )
     max_clips: Optional[int] = Field(
-        None, ge=1, le=20, description="Maximum clips to generate"
+        None, ge=1, le=20, description="Target clips to generate"
     )
     skip_stages: Optional[List[str]] = Field(
         None, description="Stages to skip (e.g., ['thumbnail', 'quality'])"

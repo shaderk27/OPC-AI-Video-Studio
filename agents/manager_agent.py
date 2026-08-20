@@ -530,11 +530,15 @@ class ManagerAgent(BaseAgent):
                     "target_languages", []
                 ),
                 "max_clips": config.get("clip_agent", {}).get("max_clips", 5),
+                "min_clips": config.get("clip_agent", {}).get("min_clips", 3),
                 "whisper_model": config.get("subtitle_agent", {}).get(
                     "whisper_model", "small"
                 ),
             },
             "content_analysis": {},
+            "clip_selection_funnel": pipeline_data.get(
+                "clip_selection_funnel", {}
+            ),
             "clips": [],
         }
 
@@ -577,6 +581,9 @@ class ManagerAgent(BaseAgent):
                 "selection_score": clip.get("selection_score", 0),
                 "gemini_video_reviewed": clip.get("gemini_video_reviewed", False),
                 "gemini_video_accepted": clip.get("gemini_video_accepted"),
+                "gemini_video_backfilled": clip.get(
+                    "gemini_video_backfilled", False
+                ),
                 "gemini_video_score": clip.get("gemini_video_score"),
                 "gemini_video_score_breakdown": clip.get(
                     "gemini_video_score_breakdown", {}
