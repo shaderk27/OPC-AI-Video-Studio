@@ -32,12 +32,30 @@ def _find_ffprobe() -> Optional[str]:
     return shutil.which("ffprobe")
 
 
-def _parse_ffmpeg_info(stderr: str) -> Dict:
+def _run_media_command(cmd: List[str]) -> subprocess.CompletedProcess:
+    """Run ffmpeg/ffprobe without relying on the Windows ANSI code page.
+
+    FFmpeg emits UTF-8 diagnostics. On Windows, ``text=True`` otherwise uses
+    the active locale (commonly cp1252), whose decoder can crash the subprocess
+    reader thread and leave stdout/stderr as ``None``. Replacement decoding
+    preserves all metadata-bearing ASCII text.
+    """
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
+def _parse_ffmpeg_info(stderr: Optional[str]) -> Dict:
     """
     Parse `ffmpeg -i <file>` stderr output into a media-info dict.
     ffmpeg always prints stream info to stderr when given only `-i` (no output).
     Returns the same shape as the ffprobe branch of get_video_info().
     """
+    stderr = stderr or ""
     info = {
         "duration": 0.0,
         "width": 0,
@@ -92,7 +110,7 @@ def get_video_info(video_path: str) -> Dict:
             "-show_format", "-show_streams",
             video_path,
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = _run_media_command(cmd)
         if result.returncode == 0:
             try:
                 data = json.loads(result.stdout)
@@ -123,7 +141,7 @@ def get_video_info(video_path: str) -> Dict:
 
     # Fallback: ffmpeg prints media info to stderr when given only `-i`.
     cmd = [FFMPEG_PATH, "-hide_banner", "-i", video_path]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_media_command(cmd)
     return _parse_ffmpeg_info(result.stderr)
 
 
@@ -164,7 +182,7 @@ def cut_clip(
         output_path,
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_media_command(cmd)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg cut failed: {result.stderr[:500]}")
 
@@ -203,7 +221,7 @@ def create_review_proxy(
         "-movflags", "+faststart",
         output_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_media_command(cmd)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg review proxy failed: {result.stderr[:500]}")
     return output_path
@@ -225,7 +243,7 @@ def extract_audio(video_path: str, output_path: str, sample_rate: int = 16000) -
         output_path,
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_media_command(cmd)
     if result.returncode != 0:
         raise RuntimeError(f"Audio extraction failed: {result.stderr[:500]}")
 
@@ -247,7 +265,7 @@ def detect_silence(
         "-f", "null", "-",
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_media_command(cmd)
     silences = []
     current_start = None
 
@@ -278,7 +296,7 @@ def get_audio_energy_segments(
         "-f", "null", "-",
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_media_command(cmd)
     segments = []
     current_time = 0.0
 
@@ -353,7 +371,7 @@ def merge_audio_into_video(
         output_path,
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_media_command(cmd)
     if result.returncode != 0:
         raise RuntimeError(f"Audio merge failed: {result.stderr[:500]}")
 
@@ -385,7 +403,7 @@ def resize_video(
         output_path,
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_media_command(cmd)
     if result.returncode != 0:
         raise RuntimeError(f"Resize failed: {result.stderr[:500]}")
 
@@ -415,7 +433,7 @@ def burn_subtitles_into_video(
         output_path,
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_media_command(cmd)
     if result.returncode != 0:
         raise RuntimeError(f"Subtitle burn failed: {result.stderr[:500]}")
 
@@ -435,7 +453,7 @@ def extract_frame(video_path: str, timestamp: float, output_path: str) -> str:
         output_path,
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_media_command(cmd)
     if result.returncode != 0:
         raise RuntimeError(f"Frame extraction failed: {result.stderr[:500]}")
 

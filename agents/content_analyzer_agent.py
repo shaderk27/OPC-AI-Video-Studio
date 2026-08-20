@@ -156,6 +156,15 @@ class ContentAnalyzerAgent(BaseAgent):
             self.log("WARNING: No audio track. Content analysis limited to metadata only.")
             return self._minimal_analysis(video_info, video_name)
 
+        # A required Gemini run must be viable before spending minutes
+        # transcribing the complete source video.
+        if self.gemini_required:
+            self.log("Checking Gemini connectivity before transcription...")
+            try:
+                self.gemini_analyzer.verify_connection()
+            except GeminiContentAnalysisError as exc:
+                raise GeminiRequiredError(str(exc)) from exc
+
         # Step 2: Extract audio and transcribe the FULL video
         self.log("Extracting audio for full transcription...")
         temp_audio = os.path.join(

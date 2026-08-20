@@ -125,6 +125,9 @@ class GeminiContentAnalyzer:
         self.timeout_ms = max(
             1000, int(float(settings.get("timeout_seconds", 120)) * 1000)
         )
+        self.preflight_timeout_ms = max(
+            1000, int(float(settings.get("preflight_timeout_seconds", 10)) * 1000)
+        )
         self.chunk_max_chars = max(2000, int(settings.get("chunk_max_chars", 50000)))
         self.max_topics = max(1, int(settings.get("max_topics", 8)))
         self.max_key_moments = max(1, int(settings.get("max_key_moments", 12)))
@@ -151,6 +154,34 @@ class GeminiContentAnalyzer:
         except GeminiContentAnalysisError as exc:
             return str(exc)
         return ""
+
+    def verify_connection(self) -> None:
+        """Fail quickly when a required run cannot reach or use Gemini.
+
+        Content analysis transcribes the complete video before its first normal
+        Gemini request. A lightweight model lookup prevents that expensive work
+        from being discarded when the endpoint, credentials, or model are not
+        usable. Per-request options keep this check deliberately short.
+        """
+        if not self.available:
+            raise GeminiContentAnalysisError(self.unavailable_reason)
+        try:
+            self._get_client().models.get(
+                model=self.model,
+                config={
+                    "http_options": {
+                        "timeout": self.preflight_timeout_ms,
+                        "retry_options": {"attempts": 1},
+                    }
+                },
+            )
+        except Exception as exc:
+            raise GeminiContentAnalysisError(
+                "Gemini preflight failed before transcription. Check the API key/model "
+                "and allow HTTPS access to generativelanguage.googleapis.com:443; "
+                "otherwise turn off 'Require Gemini API'. "
+                f"Details: {exc}"
+            ) from exc
 
     def analyze(
         self,

@@ -48,6 +48,8 @@ content_analyzer:
     required: true
     model: "gemini-3.5-flash-lite"
     timeout_seconds: 120
+    # Fail quickly before full-video transcription if Gemini is unreachable.
+    preflight_timeout_seconds: 10
     chunk_max_chars: 50000
     max_topics: 8
     max_key_moments: 12

@@ -54,6 +54,10 @@ class _Models:
         self.calls.append(kwargs)
         return SimpleNamespace(parsed=self.responses.pop(0), text="")
 
+    def get(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(name=kwargs["model"])
+
 
 class _Client:
     def __init__(self, responses):
@@ -74,6 +78,37 @@ def _config(**overrides):
 
 
 class GeminiContentAnalyzerTests(unittest.TestCase):
+    def test_preflight_uses_short_timeout_without_retries(self):
+        client = _Client([])
+        analyzer = GeminiContentAnalyzer(
+            _config(preflight_timeout_seconds=7), client=client
+        )
+
+        analyzer.verify_connection()
+
+        self.assertEqual(client.models.calls[0], {
+            "model": "gemini-3.5-flash-lite",
+            "config": {
+                "http_options": {
+                    "timeout": 7000,
+                    "retry_options": {"attempts": 1},
+                }
+            },
+        })
+
+    def test_preflight_reports_actionable_connection_error(self):
+        client = _Client([])
+        client.models.get = lambda **kwargs: (_ for _ in ()).throw(
+            TimeoutError("blocked")
+        )
+        analyzer = GeminiContentAnalyzer(_config(), client=client)
+
+        with self.assertRaisesRegex(
+            GeminiContentAnalysisError,
+            "generativelanguage.googleapis.com:443",
+        ):
+            analyzer.verify_connection()
+
     def test_returns_downstream_compatible_semantic_analysis(self):
         client = _Client([_analysis()])
         analyzer = GeminiContentAnalyzer(_config(), client=client)
