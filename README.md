@@ -203,6 +203,11 @@ fail the run and display the reason. Leave it off to retain local fallbacks.
 
 ### Whisper Model Sizes
 
+The studio uses `small` by default because it is noticeably more accurate than
+`base` while remaining practical on a CPU-only machine. The Content Analyzer,
+Clip Expert, and Subtitle Expert share this setting and reuse the full-video
+transcript where possible.
+
 | Model | Size | Speed | Accuracy | RAM |
 |-------|------|-------|----------|-----|
 | tiny | 75MB | Fastest | Basic | ~1GB |
@@ -210,6 +215,47 @@ fail the run and display the reason. Leave it off to retain local fallbacks.
 | small | 484MB | Medium | Better | ~2GB |
 | medium | 1.5GB | Slow | High | ~5GB |
 | large-v3 | 3GB | Slowest | Best | ~10GB |
+
+Configure transcription in `config.yaml`:
+
+```yaml
+subtitle_agent:
+  whisper_model: "small"
+  beam_size: 5
+  vad_filter: true
+  vad_min_silence_ms: 300
+  vocabulary_hints: ["important person", "team name", "specialist term"]
+```
+
+`vocabulary_hints` is especially useful for names, locations, teams, brands,
+and technical terminology that Whisper may otherwise misspell.
+
+### Whisper Download and Cache
+
+On its first use, the selected model is downloaded and stored under
+`models/whisper/`. Later runs load it locally and do not require a network
+connection. The downloader tries the configured Hugging Face endpoint, the
+`hf-mirror.com` mirror, and the official endpoint. It can also download directly
+from the mirror when the mirror does not provide metadata headers expected by
+the Hugging Face client.
+
+Pre-download and validate the configured model before starting a long run:
+
+```powershell
+python scripts/setup_whisper_model.py
+```
+
+If `small` cannot be downloaded but a complete `base` model is already cached,
+normal pipeline processing falls back to that cached model instead of failing.
+The setup command does not accept that fallback: it exits with an error unless
+the configured model was downloaded successfully.
+
+If you see `Could not load Whisper model 'small'`:
+
+1. Stop the web server.
+2. Run `python scripts/setup_whisper_model.py` from the project directory.
+3. Confirm it reports that the model is cached locally.
+4. Restart the web server and retry the video.
 
 ## Network Notes (Mainland China)
 
@@ -223,7 +269,7 @@ networks. The studio handles this automatically:
 | gTTS (Google) | Text-to-speech | Blocked | Uses **Edge TTS** by default (`tts_engine: "edge"`) |
 | Gemini API | Transcript content analysis + visual clip review, required by default | May be unavailable | The run fails visibly; turn off **Require Gemini API** for a deliberate local fallback |
 
-- **Pre-download the Whisper model** (optional but recommended on first run):
+- **Pre-download the Whisper model** (recommended before the first long run):
 
   ```bash
   python scripts/setup_whisper_model.py
