@@ -1,249 +1,30 @@
-# =============================================================================
-# OPC AI Video Studio - Configuration
-# One-Person Company AI Video Studio Project
-# Based on the project by Prof. Yong Zhang, Shenzhen University
-# =============================================================================
-
-project:
-  name: "OPC AI Video Studio"
-  version: "1.0.0"
-  description: "One Human + Multiple AI Agents = One-Person Video Studio"
-  # Input: 10+ minute raw footage
-  # Output: 15-60s polished short-form clips with subtitles, voiceover, captions
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Paths
-# ─────────────────────────────────────────────────────────────────────────────
-paths:
-  input_dir: "input"
-  output_dir: "output"
-  clips_dir: "output/clips"
-  subtitles_dir: "output/subtitles"
-  audio_dir: "output/audio"
-  thumbnails_dir: "output/thumbnails"
-  social_dir: "output/social"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Content Analyzer Agent Settings
-# Pre-analyzes full video to provide intelligence for downstream agents
-# Runs BEFORE the Clip Expert to enrich highlight detection
-# ─────────────────────────────────────────────────────────────────────────────
-content_analyzer:
-  # Maximum number of topics to extract from the video
-  max_topics: 8
-  # Minimum duration (seconds) for a chapter to stand on its own
-  chapter_min_duration: 30.0
-  # Number of key moments to identify (top-N most impactful)
-  key_moment_count: 10
-  # Number of sentences in the generated summary
-  summary_sentences: 3
-  # Save the full analysis report as content_analysis.json
-  save_report: true
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Clip Expert Agent Settings
-# Identifies highlights and cuts them into short clips
-# Uses Content Analyzer data if available (avoids re-transcription)
-# ─────────────────────────────────────────────────────────────────────────────
-clip_agent:
-  # Minimum and maximum clip duration in seconds
-  min_clip_duration: 15
-  max_clip_duration: 60
-  # Number of highlight clips to extract
-  max_clips: 5
-  # Highlight detection strategy:
-  #   "transcript"  - Analyze transcript for key moments (keyword density, sentiment shifts, topic changes)
-  #   "audio_energy" - Detect high-energy moments in audio (cheers, laughter, applause)
-  #   "silence"     - Cut at silence boundaries for clean clip edges
-  #   "combined"    - Use all strategies together (recommended)
-  detection_strategy: "combined"
-  # Keywords/patterns that indicate interesting content
-  highlight_keywords:
-    - "amazing"
-    - "incredible"
-    - "wow"
-    - "look at this"
-    - "important"
-    - "key point"
-    - "remember"
-    - "secret"
-    - "never seen"
-    - "breakthrough"
-  # Add padding (seconds) before and after detected highlights
-  padding_before: 1.5
-  padding_after: 1.0
-  # Ensure clips start/end at silence boundaries for clean cuts
-  snap_to_silence: true
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Subtitle Expert Agent Settings
-# Generates and translates subtitles for clips
-# ─────────────────────────────────────────────────────────────────────────────
-subtitle_agent:
-  # Whisper model size: tiny, base, small, medium, large-v3
-  # tiny  = fastest, least accurate  (~1GB RAM)
-  # base  = good balance             (~1GB RAM)
-  # small = better accuracy          (~2GB RAM)
-  # medium = high accuracy           (~5GB RAM)
-  # large-v3 = best accuracy         (~10GB RAM)
-  whisper_model: "base"
-  # Model downloads: huggingface.co is unreachable from mainland China, so the
-  # studio automatically downloads via hf-mirror.com and caches the model under
-  # models/whisper/. To override, set the HF_ENDPOINT environment variable,
-  # or pre-download once with: python scripts/setup_whisper_model.py
-  # Source language (auto-detect if null)
-  source_language: null
-  # Target languages for subtitle translation (ISO 639-1 codes)
-  # Examples: en, zh, es, fr, de, ja, ko, ar, hi, pt, ru
-  target_languages:
-    - "en"
-    - "zh"
-  # Output formats
-  formats:
-    - "srt"
-    - "vtt"
-  # Maximum characters per subtitle line
-  max_chars_per_line: 42
-  # Maximum duration per subtitle (seconds)
-  max_subtitle_duration: 7.0
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Audio Expert Agent Settings
-# Translates audio into target languages using TTS
-# ─────────────────────────────────────────────────────────────────────────────
-audio_agent:
-  # TTS engine: "edge" (Microsoft Edge TTS — free, no key, works in mainland China)
-  #             "gtts" (Google TTS — blocked on many CN networks)
-  tts_engine: "edge"
-  # Target languages for audio translation (ISO 639-1 codes)
-  target_languages:
-    - "en"
-    - "zh"
-  # Volume of original audio when mixing (0.0 = muted, 1.0 = full)
-  original_audio_volume: 0.15
-  # Volume of translated voiceover
-  voiceover_volume: 1.0
-  # Speed adjustment for TTS (1.0 = normal, 0.9 = slower, 1.1 = faster)
-  tts_speed: 1.0
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Enhancement: Thumbnail Agent
-# Generates eye-catching thumbnails from clip highlights
-# ─────────────────────────────────────────────────────────────────────────────
-thumbnail_agent:
-  # Thumbnail dimensions
-  width: 1280
-  height: 720
-  # Number of thumbnail candidates per clip
-  candidates_per_clip: 3
-  # Add text overlay (clip title) to thumbnail
-  add_text_overlay: true
-  # Font size for overlay text
-  font_size: 48
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Enhancement: Social Media Agent
-# Writes captions, hashtags, and descriptions for each platform
-# ─────────────────────────────────────────────────────────────────────────────
-social_media_agent:
-  platforms:
-    - name: "TikTok"
-      max_caption_length: 150
-      hashtag_count: 5
-    - name: "YouTube Shorts"
-      max_caption_length: 500
-      hashtag_count: 10
-    - name: "Instagram Reels"
-      max_caption_length: 2200
-      hashtag_count: 15
-    - name: "X (Twitter)"
-      max_caption_length: 280
-      hashtag_count: 3
-  # Tone: casual, professional, energetic, educational
-  tone: "energetic"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Enhancement: Quality Reviewer Agent
-# Reviews clips for quality issues
-# ─────────────────────────────────────────────────────────────────────────────
-quality_agent:
-  # Check for audio/video sync issues
-  check_av_sync: true
-  # Check subtitle timing alignment
-  check_subtitle_sync: true
-  # Check for silence gaps at clip boundaries
-  check_silence_gaps: true
-  # Minimum audio level (dB) - flag clips below this as too quiet
-  min_audio_level: -30
-  # Generate quality report
-  generate_report: true
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Enhancement: Format Adapter Agent
-# Adapts clips for different social media platforms
-# ─────────────────────────────────────────────────────────────────────────────
-format_agent:
-  # Output formats for different platforms
-  # NOTE: platforms with the SAME width/height are rendered ONCE and share the
-  # same file — e.g. TikTok, YouTube Shorts and Instagram Reels are all
-  # 1080x1920, so only one vertical video is encoded and reused for all three.
-  # Set `enabled: false` on any format you don't need to skip it entirely.
-  formats:
-    - platform: "TikTok"
-      width: 1080
-      height: 1920
-      aspect_ratio: "9:16"
-    - platform: "YouTube Shorts"
-      width: 1080
-      height: 1920
-      aspect_ratio: "9:16"
-    - platform: "Instagram Reels"
-      width: 1080
-      height: 1920
-      aspect_ratio: "9:16"
-    - platform: "YouTube"
-      width: 1920
-      height: 1080
-      aspect_ratio: "16:9"
-    - platform: "Instagram Feed"
-      width: 1080
-      height: 1080
-      aspect_ratio: "1:1"
-      # enabled: false   # <- example: uncomment to skip this format
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Orchestrator Settings
-# ─────────────────────────────────────────────────────────────────────────────
+# OPC AI Video Studio — 全局配置
+# M3（你）相关字段：subtitle_agent / audio_agent / format_agent / paths.whisper_model
 orchestrator:
-  # Pipeline stages to run (in order)
-  # Comment out stages to skip them
-  pipeline:
-    - "content_analysis"  # Pre-analyze video: topics, sentiment, chapters, key moments
-    - "clip"          # Cut highlights from long video (uses analysis if available)
-    - "subtitle"      # Generate and translate subtitles
-    - "audio"         # Translate audio
-    - "thumbnail"     # Generate thumbnails
-    - "social_media"  # Write social media copy
-    - "format"        # Adapt for different platforms
-    - "quality"       # Review quality
-  # Verbose logging
-  verbose: true
+  pipeline: [content_analysis, clip, subtitle, audio, thumbnail, social_media, format, quality]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Manager Agent Settings (Member 1 — System Architect)
-# Supervisory orchestrator with retry logic + human-in-the-loop review gate
-# ─────────────────────────────────────────────────────────────────────────────
-manager_agent:
-  # Maximum retry attempts per stage (0 = no retry, 1 = retry once)
-  max_retries: 1
-  # Timeout per stage in seconds (aborts if exceeded)
-  stage_timeout: 300
-  # Pause after Clip stage for human review of generated clips
-  review_gate_enabled: true
-  # Auto-approve all clips after this many seconds (prevents demo deadlock)
-  review_gate_timeout: 300
-  # Core stages — failure here stops the entire pipeline
-  core_stages:
-    - "content_analysis"
-    - "clip"
-    - "subtitle"
+clip_agent:
+  max_clips: 3
+
+subtitle_agent:
+  whisper_model: base        # tiny/base/small；演示追求速度用 base 或 tiny
+  target_languages: [en, zh]
+
+audio_agent:
+  target_languages: [en, zh]
+
+social_media_agent:
+  platforms: [douyin, xiaohongshu]
+
+format_agent:
+  platforms:
+    tiktok: "9:16"
+    youtube: "16:9"
+    instagram: "1:1"
+
+paths:
+  input_dir: input
+  output_dir: output
+
+# 默认源语言（content_analyzer 可覆盖；中文素材改 "zh"）
+source_language: en

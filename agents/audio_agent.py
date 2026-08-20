@@ -1,161 +1,94 @@
+# -*- coding: utf-8 -*-
+"""M3 · 配音 Agent（接入 main.py 流水线）。
+
+接口: AudioAgent(config).run(pipeline_data)
+  - 读取每个 clip 的转写文本（subtitle 阶段缓存的 clip["transcript"]）
+  - Edge TTS 生成中文/英文等多语言配音，混入（替换原音轨）视频
+  - 写回 clip["audio_translations"][lang] = {"video_path", "voiceover_path"}
+  - 更新 clip["path"] 为配音版本（与烧录字幕同语言，保证一致）
 """
-Audio Expert Agent
-===================
-Role: Audio Translation & Voiceover Specialist
-
-This agent takes video clips and their transcribed subtitles, translates
-the audio content into user-requested languages using a TTS pipeline,
-and merges the translated voiceover back into the video.
-
-Pipeline:
-1. Get transcribed segments from Subtitle Agent
-2. Translate text to target language
-3. Generate speech (TTS) in target language
-4. Merge translated audio with original video (original audio ducked)
-5. Output: Video clip with translated voiceover
-
-Output: For each clip, a translated version per target language.
-"""
-
 import os
-from pathlib import Path
-from typing import Any, Dict, List
+import asyncio
+from utils.media_utils import run, ensure_dir, FFMPEG, get_out_dir, translate_text
 
-from agents.base_agent import BaseAgent
-from utils.video_utils import merge_audio_into_video, get_video_info
-from utils.audio_utils import (
-    translate_and_speak,
-    text_to_speech,
-    get_audio_duration,
-)
-from utils.subtitle_utils import translate_segments
+# Edge TTS 免费音色（无需密钥）
+EDGE_VOICES = {
+    "zh": "zh-CN-XiaoxiaoNeural",
+    "en": "en-US-AriaNeural",
+    "es": "es-ES-ElviraNeural",
+    "ja": "ja-JP-NanamiNeural",
+    "fr": "fr-FR-DeniseNeural",
+    "de": "de-DE-KatjaNeural",
+}
 
 
-class AudioAgent(BaseAgent):
-    """AI agent that translates audio into multiple languages."""
+class AudioAgent:
+    def __init__(self, config: dict = None):
+        self.config = config or {}
+        self.target_languages = self.config.get("audio_agent", {}).get("target_languages", ["en"])
 
-    def __init__(self, config: Dict[str, Any]):
-        super().__init__(
-            name="AudioExpert",
-            role="Audio Translation & Voiceover Specialist",
-            config=config,
-        )
-        self.audio_config = config.get("audio_agent", {})
-        self.paths = config.get("paths", {})
-        self.tts_engine = self.audio_config.get("tts_engine", "gtts")
-        self.target_languages = self.audio_config.get("target_languages", ["en"])
-        self.original_volume = self.audio_config.get("original_audio_volume", 0.15)
-        self.voiceover_volume = self.audio_config.get("voiceover_volume", 1.0)
-        self.tts_speed = self.audio_config.get("tts_speed", 1.0)
+    # ---------- 底层能力（可单独测试） ----------
+    def synthesize(self, text, lang="zh", voice=None, output_path=None):
+        """Edge TTS 文本转语音 → mp3。"""
+        import edge_tts
+        if voice is None:
+            voice = EDGE_VOICES.get(lang, EDGE_VOICES["en"])
+        if output_path is None:
+            output_path = os.path.join("output", f"voiceover_{lang}.mp3")
+        ensure_dir(output_path)
 
-    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Translate audio for all clips.
+        async def _go():
+            comm = edge_tts.Communicate(text, voice)
+            await comm.save(output_path)
 
-        input_data: {"clips": [{"path", "subtitles": {lang: {"segments": [...]}}}]}
-        returns: {"clips": [... with added "audio_translations" field]}
-        """
-        clips = input_data.get("clips", [])
-        audio_dir = self.paths.get("audio_dir", "output/audio")
-        self.ensure_dir(audio_dir)
+        asyncio.new_event_loop().run_until_complete(_go())
+        return output_path
 
-        updated_clips = []
+    def mix(self, video_path, audio_path, output_path=None, replace_original=True):
+        """把配音混入视频。replace_original=True 用配音替换原音轨。"""
+        if output_path is None:
+            output_path = os.path.splitext(video_path)[0] + "_vo.mp4"
+        ensure_dir(output_path)
+        if replace_original:
+            # apad 把配音补静音到视频全长，避免视频被截断
+            run([FFMPEG, "-y", "-i", video_path, "-i", audio_path,
+                 "-filter_complex", "[1:a]apad[a]",
+                 "-map", "0:v:0", "-map", "[a]",
+                 "-c:v", "copy", "-shortest", output_path])
+        else:
+            filt = "[1:a]volume=0.8[a1];[0:a][a1]amix=inputs=2[a]"
+            run([FFMPEG, "-y", "-i", video_path, "-i", audio_path,
+                 "-filter_complex", filt, "-map", "0:v", "-map", "[a]", "-c:v", "copy", output_path])
+        return output_path
 
-        for i, clip in enumerate(clips):
+    # ---------- 流水线入口（main.py 调用） ----------
+    def run(self, pipeline_data: dict) -> dict:
+        clips = pipeline_data.get("clips", [])
+        src_lang = pipeline_data.get("detected_language", self.target_languages[0])
+        out_root = get_out_dir(self.config)
+        for clip in clips:
             clip_path = clip["path"]
-            clip_name = Path(clip["filename"]).stem
-            self.log(f"Processing clip {i+1}/{len(clips)}: {clip_name}")
+            base = clip.get("filename", os.path.splitext(os.path.basename(clip_path))[0])
+            cdir = os.path.join(out_root, "clips", base, "audio")
+            ensure_dir(cdir)
 
-            # Get source segments from subtitles
-            subtitles = clip.get("subtitles", {})
-            detected_lang = clip.get("detected_language", "en")
-
-            # Find source language segments
-            source_segments = None
-            if detected_lang in subtitles:
-                source_segments = subtitles[detected_lang].get("segments")
-            elif subtitles:
-                # Use first available language
-                first_lang = list(subtitles.keys())[0]
-                source_segments = subtitles[first_lang].get("segments")
-
-            if not source_segments:
-                self.log(f"  WARNING: No subtitle segments for {clip_name}, skipping audio translation")
-                clip["audio_translations"] = {}
-                updated_clips.append(clip)
-                continue
-
-            audio_translations = {}
-
+            text = clip.get("transcript", "")
+            audio_trans = {}
             for lang in self.target_languages:
-                if lang == detected_lang:
-                    self.log(f"  Skipping {lang} (same as source language)")
+                voice_text = text
+                if lang != src_lang and text:
+                    voice_text = translate_text(text, src_lang, lang) or text
+                if not voice_text:
                     continue
+                mp3 = self.synthesize(voice_text, lang=lang,
+                                      output_path=os.path.join(cdir, f"{base}_{lang}.mp3"))
+                mixed = self.mix(clip_path, mp3,
+                                 output_path=os.path.join(cdir, f"{base}_{lang}_vo.mp4"),
+                                 replace_original=True)
+                audio_trans[lang] = {"video_path": mixed, "voiceover_path": mp3}
 
-                self.log(f"  Translating audio to: {lang}")
-
-                try:
-                    # Step 1: Translate segments and generate TTS
-                    voiceover_filename = f"{clip_name}_voiceover_{lang}.mp3"
-                    voiceover_path = os.path.join(audio_dir, voiceover_filename)
-
-                    translate_and_speak(
-                        segments=source_segments,
-                        output_path=voiceover_path,
-                        target_lang=lang,
-                        source_lang=detected_lang,
-                        engine=self.tts_engine,
-                    )
-
-                    # Step 2: Adjust speed if needed. Combines the configured
-                    # tts_speed with a fit-to-clip speedup: when the translated
-                    # voiceover is longer than the clip, -shortest would cut the
-                    # ending off mid-word. Speed it up so it fits instead.
-                    from utils.audio_utils import adjust_audio_speed
-                    speed = self.tts_speed
-                    try:
-                        clip_duration = get_video_info(clip_path)["duration"]
-                        vo_duration = get_audio_duration(voiceover_path)
-                        if vo_duration > clip_duration + 0.3:
-                            fit_speed = vo_duration / clip_duration
-                            # Cap at 1.35x so speech doesn't sound rushed
-                            speed = min(max(speed, fit_speed), 1.35)
-                            self.log(f"  Voiceover {vo_duration:.1f}s > clip "
-                                     f"{clip_duration:.1f}s -> fitting at {speed:.2f}x")
-                    except Exception as e:
-                        self.log(f"  WARNING: could not fit voiceover to clip: {e}")
-
-                    if abs(speed - 1.0) > 0.01:
-                        adjusted_path = voiceover_path.replace(".mp3", "_adjusted.mp3")
-                        adjust_audio_speed(voiceover_path, adjusted_path, speed)
-                        voiceover_path = adjusted_path
-
-                    # Step 3: Merge voiceover with original video
-                    translated_clip_filename = f"{clip_name}_{lang}.mp4"
-                    translated_clip_path = os.path.join(audio_dir, translated_clip_filename)
-
-                    merge_audio_into_video(
-                        video_path=clip_path,
-                        audio_path=voiceover_path,
-                        output_path=translated_clip_path,
-                        original_volume=self.original_volume,
-                        voiceover_volume=self.voiceover_volume,
-                    )
-
-                    audio_translations[lang] = {
-                        "video_path": translated_clip_path,
-                        "video_filename": translated_clip_filename,
-                        "voiceover_path": voiceover_path,
-                        "voiceover_filename": voiceover_filename,
-                    }
-
-                    self.log(f"  Created translated clip: {translated_clip_filename}")
-
-                except Exception as e:
-                    self.log(f"  ERROR translating to {lang}: {e}", "error")
-
-            clip["audio_translations"] = audio_translations
-            updated_clips.append(clip)
-
-        self.log(f"Audio translation complete for {len(updated_clips)} clips")
-        return {"clips": updated_clips, **{k: v for k, v in input_data.items() if k != "clips"}}
+            if audio_trans:
+                # clip["path"] 指向源语言配音版（与烧录字幕语言一致）
+                clip["path"] = audio_trans.get(src_lang, list(audio_trans.values())[0])["video_path"]
+            clip["audio_translations"] = audio_trans
+        return {"clips": clips}

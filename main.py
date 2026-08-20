@@ -1,3 +1,4 @@
+import utils.whisper_patch  # monkey-patch：让 whisper 找到 ffmpeg（必须在其他 import 之前）
 """
 OPC AI Video Studio - Main Orchestrator
 =========================================
@@ -27,7 +28,6 @@ Example:
 """
 
 import argparse
-import io
 import json
 import os
 import sys
@@ -41,24 +41,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
-
-def _make_console() -> Console:
-    """Build a Console that cannot crash the pipeline.
-
-    When the pipeline runs inside a detached/background server process on
-    Windows, stdout may have no valid console handle; rich's legacy Windows
-    renderer then raises OSError [Errno 22] on flush. Probe once and fall
-    back to a null console so runs keep working headless.
-    """
-    try:
-        c = Console()
-        c.print("")  # probe — exercises the same write/flush path
-        return c
-    except OSError:
-        return Console(file=io.StringIO(), force_terminal=False, force_interactive=False)
-
-
-console = _make_console()
+console = Console()
 
 
 def load_config(config_path: str) -> dict:
@@ -109,14 +92,8 @@ def get_agent_role(stage: str) -> str:
 
 
 def run_studio(video_path: str, config: dict, skip_stages: list = None,
-               override_languages: str = None, override_max_clips: int = None,
-               on_stage: callable = None):
-    """Run the full AI Video Studio pipeline.
-
-    on_stage: optional callback(stage, status, message) invoked with
-              status in ("started", "completed", "failed"). Used by the
-              web backend (api/server.py) to stream live progress.
-    """
+               override_languages: str = None, override_max_clips: int = None):
+    """Run the full AI Video Studio pipeline."""
 
     skip_stages = skip_stages or []
     start_time = time.time()
@@ -139,7 +116,7 @@ def run_studio(video_path: str, config: dict, skip_stages: list = None,
     print_banner()
     console.print(f"\n[bold]Input:[/bold] {escape(video_path)}")
     console.print(f"[bold]Pipeline:[/bold] {escape(' -> '.join(active_stages))}")
-    console.print(f"[bold]Languages:[/bold] {escape(str(config.get('subtitle_agent', {}).get('target_languages', ['en'])))}\n")
+    console.print(f"[bold]Languages:[/bold] {escape(str(config.get('subtitle_agent', {}).get('target_languages', ['en'])))}]\n")
 
     print_pipeline_diagram(active_stages)
 
@@ -161,9 +138,6 @@ def run_studio(video_path: str, config: dict, skip_stages: list = None,
         console.print(f"\n[bold cyan]{'='*60}[/bold cyan]")
         console.print(f"[bold cyan]Stage: {stage.upper()}[/bold cyan]")
         console.print(f"[bold cyan]{'='*60}[/bold cyan]")
-
-        if on_stage:
-            on_stage(stage, "started", None)
 
         try:
             if stage == "content_analysis":
@@ -225,21 +199,10 @@ def run_studio(video_path: str, config: dict, skip_stages: list = None,
                 result = agent.run(pipeline_data)
                 results["quality"] = result
 
-            if on_stage:
-                summary = {}
-                if stage == "clip":
-                    summary = {"clips": len(result.get("clips", []))}
-                on_stage(stage, "completed", summary)
-
         except Exception as e:
             console.print(f"[red]Stage '{escape(stage)}' failed: {escape(str(e))}[/red]")
             import traceback
-            try:
-                traceback.print_exc()
-            except OSError:
-                pass  # stderr unavailable in detached server process
-            if on_stage:
-                on_stage(stage, "failed", str(e))
+            traceback.print_exc()
             if stage in ("content_analysis", "clip", "subtitle"):  # Core stages - stop on failure
                 console.print(f"[red]Core stage '{escape(stage)}' failed. Stopping pipeline.[/red]")
                 break

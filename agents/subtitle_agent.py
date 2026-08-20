@@ -1,213 +1,159 @@
+# -*- coding: utf-8 -*-
+"""【占位 STUB · 待 M1/M2 替换】Subtitle Agent。
+
+Whisper 转录 + 写 SRT/VTT + 烧字幕到视频。配合 utils/whisper_patch.py 使用。
+
+关键修复（v3）：
+  * 永远用 os.makedirs(..., exist_ok=True) 创建父目录（不依赖 ensure_dir import）
+  * 所有路径转 os.path.abspath 绝对路径
+  * burn_in 失败不阻塞其他 clip
+  * subs[lang] 返 dict 格式给 main.py
 """
-Subtitle Expert Agent
-======================
-Role: Multi-Language Subtitle Generator
-
-This agent takes video clips and generates subtitles using speech-to-text
-(faster-whisper), then translates those subtitles into user-requested languages.
-
-Pipeline:
-1. Extract audio from clip
-2. Transcribe audio to text segments with timestamps
-3. Detect source language
-4. Translate segments to each target language
-5. Export in multiple formats (SRT, VTT, TXT)
-
-Output: Subtitle files for each clip in each requested language.
-"""
-
 import os
-from pathlib import Path
-from typing import Any, Dict, List
+import shutil
 
-from agents.base_agent import BaseAgent
-from utils.video_utils import extract_audio
-from utils.subtitle_utils import (
-    transcribe_audio,
-    translate_segments,
-    detect_language_from_segments,
-    segments_to_srt,
-    segments_to_vtt,
-    segments_to_txt,
-    format_timestamp,
+import whisper
+from utils.media_utils import (
+    run, ensure_dir, get_out_dir, FFMPEG
 )
 
 
-class SubtitleAgent(BaseAgent):
-    """AI agent that generates and translates subtitles for video clips."""
+def _srt_time(t: float) -> str:
+    if t is None or t < 0:
+        t = 0
+    hours = int(t // 3600)
+    minutes = int((t % 3600) // 60)
+    seconds = int(t % 60)
+    millis = int((t - int(t)) * 1000)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
 
-    def __init__(self, config: Dict[str, Any]):
-        super().__init__(
-            name="SubtitleExpert",
-            role="Multi-Language Subtitle Generator",
-            config=config,
+
+class SubtitleAgent:
+    def __init__(self, config: dict = None):
+        self.config = config or {}
+        sa = self.config.get("subtitle_agent", {})
+        self.model_size = sa.get("model_size", "base")
+        self.languages = sa.get("languages", ["en"])
+        self._model = None
+        self._loaded_size = None
+
+    def _load_model(self):
+        if self._model is None or self._loaded_size != self.model_size:
+            self._model = whisper.load_model(self.model_size)
+            self._loaded_size = self.model_size
+        return self._model
+
+    def transcribe(self, clip_path: str, language=None):
+        model = self._load_model()
+        return model.transcribe(clip_path, language=language, verbose=False)
+
+    @staticmethod
+    def _to_srt(segments) -> str:
+        lines = []
+        for i, seg in enumerate(segments, 1):
+            start = _srt_time(seg.get("start", 0))
+            end = _srt_time(seg.get("end", 0))
+            text = (seg.get("text") or "").strip()
+            if not text:
+                continue
+            lines.append(str(i))
+            lines.append(f"{start} --> {end}")
+            lines.append(text)
+            lines.append("")
+        return "\n".join(lines)
+
+    @staticmethod
+    def burn_in(clip_path: str, srt_path: str, output_path: str):
+        clip_path = os.path.abspath(clip_path)
+        srt_path = os.path.abspath(srt_path)
+        output_path = os.path.abspath(output_path)
+
+        output_dir = os.path.dirname(output_path)
+        os.makedirs(output_dir, exist_ok=True)
+
+        tmp_srt = os.path.join(output_dir, "tmp_subs.srt")
+        shutil.copy(srt_path, tmp_srt)
+
+        import subprocess
+        # 关键修复：显式指定 ffmpeg 子进程的 cwd=output_dir，
+        # 这样 -vf subtitles=tmp_subs.srt 用相对文件名就能找到 srt 文件
+        proc = subprocess.run(
+            [
+                FFMPEG, "-y",
+                "-i", clip_path,
+                "-vf", f"subtitles={os.path.basename(tmp_srt)}",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-c:a", "copy",
+                output_path,
+            ],
+            cwd=output_dir,
+            capture_output=True,
         )
-        self.sub_config = config.get("subtitle_agent", {})
-        self.paths = config.get("paths", {})
-        self.whisper_model = self.sub_config.get("whisper_model", "base")
-        self.source_language = self.sub_config.get("source_language")
-        self.target_languages = self.sub_config.get("target_languages", ["en"])
-        self.formats = self.sub_config.get("formats", ["srt", "vtt"])
-        self.max_chars = self.sub_config.get("max_chars_per_line", 42)
-        self.max_duration = self.sub_config.get("max_subtitle_duration", 7.0)
+        if proc.returncode != 0:
+            err = (proc.stderr or b"").decode("utf-8", errors="replace")
+            print(f"[burn_in] ffmpeg stderr: {err[-2000:]}")
+            raise subprocess.CalledProcessError(proc.returncode, "ffmpeg burn_in", output=None, stderr=err.encode("utf-8") if isinstance(err, str) else err)
 
-    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Generate subtitles for all clips.
 
-        input_data: {"clips": [{"path", "filename", ...}]}
-        returns: {"clips": [... with added "subtitles" field]}
-        """
-        clips = input_data.get("clips", [])
-        subtitles_dir = self.paths.get("subtitles_dir", "output/subtitles")
-        self.ensure_dir(subtitles_dir)
+        try:
+            os.remove(tmp_srt)
+        except Exception:
+            pass
 
-        updated_clips = []
+    def run(self, pipeline_data: dict) -> dict:
+        clips = pipeline_data.get("clips", [])
+        if not clips:
+            pipeline_data["subtitles"] = {}
+            return {"subtitles": {}}
 
-        for i, clip in enumerate(clips):
+        out_dir = get_out_dir(self.config)
+        languages = self.languages
+        detected = pipeline_data.get("detected_language", "en")
+        src_lang = detected if detected in languages else (languages[0] if languages else "auto")
+
+        subs = {}
+        for clip in clips:
             clip_path = clip["path"]
-            clip_name = Path(clip["filename"]).stem
-            self.log(f"Processing clip {i+1}/{len(clips)}: {clip_name}")
+            clip_id = clip["filename"]
+            clip_name = os.path.splitext(os.path.basename(clip_path))[0]
 
-            # Step 1: Extract audio from clip
-            temp_audio = os.path.join(subtitles_dir, f"{clip_name}_audio.wav")
-            extract_audio(clip_path, temp_audio)
-
-            # Step 2: Transcribe
-            self.log(f"  Transcribing (model: {self.whisper_model})...")
-            segments = transcribe_audio(
-                temp_audio,
-                model_size=self.whisper_model,
-                language=self.source_language,
-            )
-
-            # Clean up temp audio
+            clip_sub_dir = os.path.abspath(os.path.join(out_dir, "clips", clip_id, "subtitle"))
+            os.makedirs(clip_sub_dir, exist_ok=True)
             try:
-                os.remove(temp_audio)
-            except OSError:
+                ensure_dir(clip_sub_dir)
+            except Exception:
                 pass
 
-            if not segments:
-                self.log(f"  WARNING: No speech detected in {clip_name}")
-                clip["subtitles"] = {}
-                updated_clips.append(clip)
-                continue
+            try:
+                tr = self.transcribe(clip_path, language=src_lang if src_lang != "auto" else None)
+                segments = tr.get("segments", []) if isinstance(tr, dict) else []
+            except Exception as e:
+                print(f"[subtitle_agent] transcribe failed for {clip_id}: {e}")
+                segments = []
 
-            # Step 3: Detect source language
-            detected_lang = detect_language_from_segments(segments)
-            self.log(f"  Detected source language: {detected_lang}")
+            srt_path = os.path.abspath(os.path.join(clip_sub_dir, f"{clip_name}.srt"))
+            srt_content = self._to_srt(segments)
+            with open(srt_path, "w", encoding="utf-8") as f:
+                f.write(srt_content)
 
-            # Step 4: Split long segments for better readability
-            segments = self._split_long_segments(segments)
+            vtt_path = os.path.abspath(os.path.join(clip_sub_dir, f"{clip_name}.vtt"))
+            vtt_content = "WEBVTT\n\n" + srt_content.replace(",", ".")
+            with open(vtt_path, "w", encoding="utf-8") as f:
+                f.write(vtt_content)
 
-            # Step 5: Generate subtitles for source language + all target languages
-            clip_subtitles = {}
-            languages_to_process = set([detected_lang] + self.target_languages)
+            burned_path = os.path.abspath(os.path.join(clip_sub_dir, f"{clip_name}_burned.mp4"))
+            try:
+                self.burn_in(clip_path, srt_path, burned_path)
+            except Exception as e:
+                print(f"[subtitle_agent] burn_in failed for {clip_id}: {e}")
+                burned_path = None
 
-            for lang in languages_to_process:
-                self.log(f"  Generating subtitles for: {lang}")
+            subs[src_lang] = {
+                "srt": {"path": srt_path, "content": srt_content, "language": src_lang},
+                "vtt": {"path": vtt_path},
+                "burned": {"path": burned_path},
+            }
 
-                if lang == detected_lang:
-                    # Source language - no translation needed
-                    lang_segments = segments
-                else:
-                    # Translate
-                    lang_segments = translate_segments(segments, lang, source_lang=detected_lang)
-
-                lang_subtitles = {}
-
-                for fmt in self.formats:
-                    ext = fmt
-                    sub_filename = f"{clip_name}_{lang}.{ext}"
-                    sub_path = os.path.join(subtitles_dir, sub_filename)
-
-                    if fmt == "srt":
-                        segments_to_srt(lang_segments, sub_path)
-                    elif fmt == "vtt":
-                        segments_to_vtt(lang_segments, sub_path)
-
-                    lang_subtitles[fmt] = {
-                        "path": sub_path,
-                        "filename": sub_filename,
-                    }
-
-                # Also export plain text transcript
-                txt_filename = f"{clip_name}_{lang}.txt"
-                txt_path = os.path.join(subtitles_dir, txt_filename)
-                segments_to_txt(lang_segments, txt_path)
-                lang_subtitles["txt"] = {
-                    "path": txt_path,
-                    "filename": txt_filename,
-                }
-
-                clip_subtitles[lang] = {
-                    "formats": lang_subtitles,
-                    "segments": lang_segments,
-                }
-
-            clip["subtitles"] = clip_subtitles
-            clip["detected_language"] = detected_lang
-            updated_clips.append(clip)
-
-        self.log(f"Generated subtitles for {len(updated_clips)} clips "
-                 f"in {len(self.target_languages)} languages")
-        return {"clips": updated_clips, **{k: v for k, v in input_data.items() if k != "clips"}}
-
-    def _split_long_segments(self, segments: List[Dict]) -> List[Dict]:
-        """
-        Split segments that are too long or have too many characters.
-        Ensures subtitle readability.
-        """
-        result = []
-        for seg in segments:
-            text = seg["text"]
-            duration = seg["end"] - seg["start"]
-
-            # Check if splitting is needed
-            needs_split = (
-                len(text) > self.max_chars * 2 or
-                duration > self.max_duration
-            )
-
-            if not needs_split:
-                result.append(seg)
-                continue
-
-            # Split by sentence boundaries first
-            import re
-            sentences = re.split(r'(?<=[.!?。！？])\s+', text)
-
-            if len(sentences) <= 1:
-                # Split by commas or just by character count
-                if len(text) > self.max_chars * 2:
-                    mid = len(text) // 2
-                    # Find nearest space
-                    for offset in range(min(20, mid)):
-                        if text[mid - offset] == ' ':
-                            mid = mid - offset
-                            break
-                        if text[mid + offset] == ' ':
-                            mid = mid + offset
-                            break
-                    sentences = [text[:mid].strip(), text[mid:].strip()]
-                else:
-                    result.append(seg)
-                    continue
-
-            # Distribute time across sentences
-            total_chars = sum(len(s) for s in sentences)
-            current_time = seg["start"]
-            seg_duration = seg["end"] - seg["start"]
-
-            for sentence in sentences:
-                if not sentence.strip():
-                    continue
-                sentence_duration = (len(sentence) / total_chars) * seg_duration
-                result.append({
-                    "start": round(current_time, 3),
-                    "end": round(current_time + sentence_duration, 3),
-                    "text": sentence.strip(),
-                })
-                current_time += sentence_duration
-
-        return result
+        pipeline_data["subtitles"] = subs
+        pipeline_data["clips"] = clips  # forward 给下游，主调用需要 result["clips"]
+        return {"subtitles": subs, "clips": clips}

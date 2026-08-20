@@ -1,29 +1,12 @@
-# OPC AI Video Studio - Python Dependencies
-# Install with: pip install -r requirements.txt
-#
-# No system-level ffmpeg installation needed — imageio-ffmpeg bundles it.
-# No API keys required — free services only:
-#   - Whisper model via HuggingFace (auto-uses hf-mirror.com on CN networks)
-#   - Translation: Google -> MyMemory fallback (deep-translator)
-#   - TTS: Edge TTS (Microsoft, works in mainland China)
+# OPC AI Video Studio — 团队依赖（合并各成员所需）
+# 中国大陆网络：先 `py -m pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple`
 
-moviepy>=2.0.0          # Video editing (cutting, merging, effects)
-imageio-ffmpeg>=0.5.0   # Bundled ffmpeg binary (no system install needed)
-faster-whisper>=1.0.0   # Speech-to-text (Whisper model, CPU, int8 quantization)
-deep-translator>=1.10.0 # Text translation (Google/MyMemory, no API key)
-gTTS>=2.3.0             # Text-to-speech fallback (Google TTS)
-edge-tts>=6.0.0         # Text-to-speech primary (Edge TTS, works in mainland China)
-pyyaml>=6.0             # Config file parsing (config.yaml)
-rich>=13.0.0            # Console UI (tables, panels, progress bars)
-pysrt>=1.1.2            # SRT subtitle file parsing and manipulation
-Pillow>=10.0.0          # Image processing (thumbnails, text overlays)
-numpy>=1.24.0           # Numerical operations (used by moviepy + content analysis)
+# 主程序依赖（M1 的 main.py 用到）
+PyYAML>=6.0
+rich>=13.0
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Web API Layer (Member 1 — System Architect)
-# FastAPI backend with SSE streaming for the demo frontend
-# ─────────────────────────────────────────────────────────────────────────────
-aiofiles>=23.0.0        # Async file I/O (static file serving)
-fastapi>=0.110.0        # REST API bridge (serves web/ + /api endpoints)
-uvicorn>=0.29.0         # ASGI server for FastAPI
-python-multipart>=0.0.9 # Multipart uploads (POST /api/upload)
+# M3 媒体流水线
+openai-whisper>=20231117      # 字幕转写（首跑会自动通过镜像下载模型）
+edge-tts>=6.1.9              # 中文/英文配音（免费，国内可达）
+imageio-ffmpeg>=0.5.1        # 内置 ffmpeg 二进制，免手动装 ffmpeg / 配 PATH
+deep-translator>=1.11.0      # 多语言字幕/配音翻译（可选；装不上也不影响单语版）

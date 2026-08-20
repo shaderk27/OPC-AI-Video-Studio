@@ -1,43 +1,42 @@
+# -*- coding: utf-8 -*-
+"""M3 · Day 1 必做：在中国网络下预下载 Whisper 模型，避免演示时首跑联网卡死。
+
+IMPROVEMENT_PLAN.md 第 7 节风险项：
+    "Whisper model slow on first run → Pre-download model before demo"
+
+用法（在 team_project 目录下，Windows PowerShell 也可）：
+    python scripts/setup_whisper_model.py            # 默认下载 base
+    python scripts/setup_whisper_model.py small      # 指定型号
+
+模型会被缓存到：
+    Windows: C:\\Users\\<你的用户名>\\.cache\\whisper\\
+    Linux:   ~/.cache/whisper/
+之后 subtitle_agent.transcribe() 会直接复用缓存，不再联网。
 """
-Pre-download the Whisper model so the first pipeline run doesn't need to fetch it.
-
-The studio downloads the model from hf-mirror.com (automatic fallback when
-huggingface.co is unreachable, e.g. on mainland China networks) and caches it
-under models/whisper/. Run this once to download it ahead of time:
-
-    python scripts/setup_whisper_model.py
-"""
-
 import os
 import sys
 
-# Make sure the project root is importable regardless of CWD
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
-import yaml  # noqa: E402
-
-from utils.subtitle_utils import (  # noqa: E402
-    _load_whisper_model,
-    _resolve_hf_endpoint,
-    WHISPER_MODELS_DIR,
-)
+# 中国大陆网络：让 torch/whisper 从镜像拉取权重
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 
-def main() -> None:
-    config_path = os.path.join(PROJECT_ROOT, "config.yaml")
-    with open(config_path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-
-    model_size = cfg.get("subtitle_agent", {}).get("whisper_model", "base")
-
-    print(f"Endpoint : {_resolve_hf_endpoint()}")
-    print(f"Model    : faster-whisper '{model_size}' (CPU, int8)")
-    print(f"Save to  : {WHISPER_MODELS_DIR}")
-    print("Downloading... (this can take a few minutes the first time)")
-    _load_whisper_model(model_size)
-    print("Done. The model is cached locally; the pipeline will use it offline.")
+def main():
+    size = sys.argv[1] if len(sys.argv) > 1 else "base"
+    print(f"[M3] 开始预下载 Whisper 模型: {size} (走 hf-mirror 镜像)")
+    try:
+        import whisper
+        whisper.load_model(size)
+        print(f"[M3] 模型 {size} 已就绪，缓存在 {whisper._MODELS_DIR}")
+    except Exception as e:
+        print("[M3] 自动下载失败，请手动方案：")
+        print("  1) 到镜像站下载对应 .pt 文件（如 base.pt）")
+        print("     镜像示例: https://hf-mirror.com/ 搜索 openai/whisper 资源，")
+        print("     或直接百度 'whisper base.pt 国内镜像' 获取下载链接")
+        print("  2) 把 .pt 放进缓存目录:")
+        print("     Windows: C:\\Users\\<用户名>\\.cache\\whisper\\")
+        print("     Linux:   ~/.cache/whisper/")
+        print(f"  原始错误: {e}")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
