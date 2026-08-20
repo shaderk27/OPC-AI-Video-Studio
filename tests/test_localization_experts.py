@@ -13,6 +13,7 @@ import main
 from agents.audio_agent import AudioAgent, AUDIO_SYSTEM_INSTRUCTION
 from agents.subtitle_agent import SubtitleAgent, SUBTITLE_SYSTEM_INSTRUCTION
 from api import webapp
+from utils.audio_separation import AudioSeparationError
 from utils.gemini_agent_client import GeminiAgentClient
 from utils.audio_utils import build_aligned_voiceover, gemini_text_to_speech
 from utils.localization_review import apply_localization_review, build_localization_review
@@ -119,8 +120,93 @@ class GeminiFoundationTests(unittest.TestCase):
                 {"type": "audio"}, client.interactions.call["response_format"]
             )
 
+    def test_transient_gemini_failure_is_retried_and_traced(self):
+        class FlakyModels:
+            def __init__(self):
+                self.calls = 0
+
+            def generate_content(self, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise ConnectionError("temporary TLS failure")
+                return _Response({"ok": True})
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "utils.gemini_agent_client.time.sleep"
+        ):
+            cfg = _config(tmp, "subtitle_agent")
+            cfg["subtitle_agent"]["gemini"]["transport_retries"] = 1
+            client = SimpleNamespace(models=FlakyModels())
+            wrapper = GeminiAgentClient(
+                cfg,
+                "subtitle_agent",
+                "subtitle_expert",
+                "Subtitle Localization Expert",
+                SUBTITLE_SYSTEM_INSTRUCTION,
+                {"type": "object"},
+                client,
+            )
+            result, trace_path = wrapper.generate(
+                {"cue": "hello"}, clip_id="clip-1", language="ko"
+            )
+            trace = json.loads(Path(trace_path).read_text(encoding="utf-8"))
+        self.assertEqual({"ok": True}, result)
+        self.assertEqual(["failed", "complete"], [
+            attempt["status"] for attempt in trace["transport_attempts"]
+        ])
+
 
 class SubtitleExpertTests(unittest.TestCase):
+    def test_low_vad_coverage_retranscribes_and_keeps_later_speech(self):
+        response = {
+            "clip_id": "clip",
+            "source_language": "en",
+            "target_language": "en",
+            "summary": "Complete commentary",
+            "cues": [
+                {"cue_id": "cue_0001", "translated_text": "Opening call.",
+                 "line_break_text": "Opening call.", "confidence": 1, "warning": ""},
+                {"cue_id": "cue_0002", "translated_text": "Later",
+                 "line_break_text": "Later", "confidence": 1, "warning": ""},
+                {"cue_id": "cue_0003", "translated_text": "commentary.",
+                 "line_break_text": "commentary.", "confidence": 1, "warning": ""},
+            ],
+        }
+        primary = [{"start": 0.0, "end": 2.0, "text": "Opening call."}]
+        recovered = [
+            {"start": 0.0, "end": 2.0, "text": "Opening call."},
+            {"start": 2.0, "end": 19.0, "text": "Later commentary."},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = SubtitleAgent(
+                _config(tmp, "subtitle_agent"), _Client([response])
+            )
+            clip = {
+                "path": str(Path(tmp) / "clip.mp4"),
+                "filename": "clip.mp4",
+                "start": 41.0,
+                "end": 61.0,
+                "duration": 20.0,
+            }
+            with patch("agents.subtitle_agent.extract_audio"), patch(
+                "agents.subtitle_agent.transcribe_audio",
+                side_effect=[primary, recovered],
+            ) as transcribe:
+                result = agent.create_plans({
+                    "clips": [clip],
+                    "content_analysis": {},
+                    "full_transcript": [{
+                        "start": 42.0, "end": 61.0, "text": "Commentary"
+                    }],
+                })
+
+        current = result["clips"][0]
+        self.assertEqual(2, transcribe.call_count)
+        self.assertFalse(transcribe.call_args_list[1].kwargs["vad_filter"])
+        self.assertEqual(19.0, current["source_subtitle_segments"][-1]["end"])
+        self.assertTrue(current["subtitle_transcription"]["recovery_used"])
+        self.assertTrue(current["subtitle_plans"]["en"]["approved"])
+
     def test_validation_keeps_whisper_timestamps_authoritative(self):
         with tempfile.TemporaryDirectory() as tmp:
             agent = SubtitleAgent(_config(tmp, "subtitle_agent"), _Client())
@@ -180,6 +266,40 @@ class SubtitleExpertTests(unittest.TestCase):
             )
             self.assertIn("validation_errors", client.models.calls[1]["contents"])
 
+    def test_adjacent_tiny_whisper_fragment_is_merged_before_agent_handoff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = SubtitleAgent(_config(tmp, "subtitle_agent"), _Client())
+            segments = [
+                {"start": 0.0, "end": 1.0, "text": "What a goal!"},
+                {"start": 1.1, "end": 3.0, "text": "The crowd erupts."},
+            ]
+            merged = agent._merge_short_segments(segments)
+        self.assertEqual(1, len(merged))
+        self.assertEqual(0.0, merged[0]["start"])
+        self.assertEqual(3.0, merged[0]["end"])
+        self.assertIn("crowd", merged[0]["text"])
+
+    def test_each_target_cue_rejects_control_text_even_if_other_cues_match_script(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = SubtitleAgent(_config(tmp, "subtitle_agent"), _Client())
+            source = [
+                {"cue_id": "cue_0001", "start": 0.0, "end": 2.0, "text": "Goal"},
+                {"cue_id": "cue_0002", "start": 2.0, "end": 4.0, "text": "Amazing"},
+            ]
+            raw = {
+                "clip_id": "clip", "source_language": "en",
+                "target_language": "ko", "summary": "goal",
+                "cues": [
+                    {"cue_id": "cue_0001", "translated_text": "\x80\x80",
+                     "line_break_text": "\x80\x80", "confidence": 0.8, "warning": ""},
+                    {"cue_id": "cue_0002", "translated_text": "놀랍습니다",
+                     "line_break_text": "놀랍습니다", "confidence": 0.9, "warning": ""},
+                ],
+            }
+            _plan, errors = agent._validate_plan(raw, "clip", "en", "ko", source)
+        self.assertTrue(any("control characters" in error for error in errors))
+        self.assertTrue(any("cue_0001" in error and "script" in error for error in errors))
+
 
 class AudioExpertTests(unittest.TestCase):
     def test_audio_prompt_is_isolated_from_subtitle_role(self):
@@ -222,6 +342,65 @@ class AudioExpertTests(unittest.TestCase):
         filters = command[command.index("-filter_complex") + 1]
         self.assertIn("apad=whole_dur=2.000", filters)
 
+    def test_exact_maximum_speed_ratio_does_not_fail_from_float_rounding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = AudioAgent(_config(tmp, "audio_agent"), _Client())
+            cue = {
+                "cue_id": "cue_0002", "start": 0.0, "end": 2.0,
+                "spoken_text": "実況です", "performance_direction": "excited",
+            }
+            plan = {"trace_paths": []}
+            with patch.object(
+                agent, "_synthesize",
+                side_effect=[("initial.wav", "gemini"), ("short.wav", "gemini")],
+            ), patch.object(
+                agent, "_shorten_cue", return_value=("短い実況", "repair.json")
+            ), patch(
+                "agents.audio_agent.get_audio_duration",
+                side_effect=[2.5, 2.4000001, 2.0],
+            ), patch("agents.audio_agent.adjust_audio_speed"):
+                rendered = agent._render_cue(cue, "match", "ja", plan, tmp)
+
+            self.assertEqual(1.2, rendered["speed"])
+            self.assertTrue(rendered["shortened"])
+
+    def test_one_language_render_failure_does_not_discard_other_languages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            clip_path = Path(tmp) / "match.mp4"
+            clip_path.write_bytes(b"fixture")
+            agent = AudioAgent(_config(tmp, "audio_agent"), _Client())
+            cue = {"cue_id": "cue_0001", "start": 0.0, "end": 2.0}
+            clip = {
+                "path": str(clip_path), "filename": "match.mp4",
+                "dubbing_plans": {
+                    "ja": {"approved": True, "cues": [dict(cue)]},
+                    "ko": {"approved": True, "cues": [dict(cue)]},
+                },
+            }
+
+            def render(_cue, _clip, language, _plan, _audio_dir):
+                if language == "ja":
+                    raise RuntimeError("cue cannot fit")
+                return {
+                    "path": str(Path(tmp) / "ko.wav"), "provider": "gemini",
+                    "start": 0.0, "end": 2.0,
+                }
+
+            with patch(
+                "agents.audio_agent.get_video_info", return_value={"duration": 5.0}
+            ), patch(
+                "agents.audio_agent.separate_background",
+                side_effect=AudioSeparationError("separator unavailable"),
+            ), patch.object(agent, "_render_cue", side_effect=render), patch(
+                "agents.audio_agent.build_aligned_voiceover"
+            ), patch("agents.audio_agent.merge_voiceover_with_background"):
+                result = agent.render_plans({"clips": [clip]})
+
+            rendered_clip = result["clips"][0]
+            self.assertIn("ko", rendered_clip["audio_translations"])
+            self.assertIn("ja", rendered_clip["audio_failures"])
+            self.assertIn("cue cannot fit", rendered_clip["audio_failures"]["ja"]["error"])
+
     def test_gemini_tts_failure_uses_explicit_edge_fallback_and_traces_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = _config(tmp, "audio_agent")
@@ -258,10 +437,11 @@ class AudioExpertTests(unittest.TestCase):
             traces = [json.loads(Path(path).read_text(encoding="utf-8")) for path in plan["trace_paths"]]
             self.assertEqual(["failed", "complete"], [trace["status"] for trace in traces])
             self.assertTrue(all(trace["fallback_used"] for trace in traces))
+            self.assertEqual("ko-KR-SunHiNeural", traces[-1]["result"]["voice"])
 
 
 class LocalizationReviewTests(unittest.TestCase):
-    def test_review_edits_text_but_cannot_change_timing(self):
+    def test_review_only_edits_audio_and_subtitles_remain_auto_approved(self):
         clips = [{
             "filename": "clip.mp4",
             "subtitle_plans": {"ko": {"cues": [{
@@ -276,13 +456,14 @@ class LocalizationReviewTests(unittest.TestCase):
         review = build_localization_review(clips)
         item = review["items"][0]
         item["approved"] = True
-        item["subtitle_plan"]["cues"][0].update(
-            {"line_break_text": "new", "translated_text": "new", "start": 90}
-        )
+        self.assertIsNone(item["subtitle_plan"])
         item["dubbing_plan"]["cues"][0].update({"spoken_text": "new speech", "end": 99})
 
         apply_localization_review(clips, review)
         self.assertEqual(0.0, clips[0]["subtitle_plans"]["ko"]["cues"][0]["start"])
+        self.assertEqual("old", clips[0]["subtitle_plans"]["ko"]["cues"][0]["translated_text"])
+        self.assertTrue(clips[0]["subtitle_plans"]["ko"]["approved"])
+        self.assertEqual("automatic", clips[0]["subtitle_plans"]["ko"]["approval_mode"])
         self.assertEqual(2.0, clips[0]["dubbing_plans"]["ko"]["cues"][0]["end"])
         self.assertEqual("new speech", clips[0]["dubbing_plans"]["ko"]["cues"][0]["spoken_text"])
 
@@ -355,7 +536,7 @@ class LocalizationReviewTests(unittest.TestCase):
 
 
 class CombinedLocalizationOrchestrationTests(unittest.TestCase):
-    def test_main_hands_subtitle_plan_to_audio_then_reviews_before_render(self):
+    def test_main_auto_renders_subtitles_then_reviews_audio(self):
         order = []
         clip = {"filename": "clip.mp4", "path": "clip.mp4", "duration": 4.0}
         clip_result = {
@@ -370,7 +551,7 @@ class CombinedLocalizationOrchestrationTests(unittest.TestCase):
                 {"cue_id": "cue_0001", "start": 0.0, "end": 2.0, "text": "Goal!"}
             ]
             current["subtitle_plans"] = {"ko": {
-                "approved": False,
+                "approved": True,
                 "cues": [{
                     "cue_id": "cue_0001", "start": 0.0, "end": 2.0,
                     "source_text": "Goal!", "translated_text": "골!",
@@ -392,16 +573,8 @@ class CombinedLocalizationOrchestrationTests(unittest.TestCase):
             }}
             return {"clips": input_data["clips"]}
 
-        def review(payload):
-            order.append("review")
-            self.assertIsNotNone(payload["items"][0]["subtitle_plan"])
-            self.assertIsNotNone(payload["items"][0]["dubbing_plan"])
-            payload["items"][0]["approved"] = True
-            return payload
-
         def subtitle_render(input_data):
             order.append("subtitle_render")
-            self.assertTrue(input_data["localization_review_applied"])
             self.assertTrue(input_data["clips"][0]["subtitle_plans"]["ko"]["approved"])
             input_data["clips"][0]["subtitles"] = {"ko": {"formats": {}}}
             return {"clips": input_data["clips"]}
@@ -435,11 +608,13 @@ class CombinedLocalizationOrchestrationTests(unittest.TestCase):
                 "input/match.mp4",
                 config,
                 on_review=lambda clips: clips,
-                on_localization_review=review,
+                on_localization_review=lambda _payload: self.fail(
+                    "automatic dubbing must not request human approval"
+                ),
             )
 
         self.assertEqual(
-            ["subtitle_plan", "audio_plan", "review", "subtitle_render", "audio_render"],
+            ["subtitle_plan", "subtitle_render", "audio_plan", "audio_render"],
             order,
         )
         self.assertIn("ko", result["clips"][0]["subtitles"])

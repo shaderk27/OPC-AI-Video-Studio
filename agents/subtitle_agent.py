@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -60,7 +61,7 @@ the requested JSON schema and no commentary.
 
 
 class SubtitleAgent(BaseAgent):
-    """Plans subtitles with Gemini, then renders approved plans to files."""
+    """Plans Gemini subtitles and renders them automatically."""
 
     def __init__(self, config: Dict[str, Any], gemini_client: Any = None):
         super().__init__(
@@ -82,6 +83,8 @@ class SubtitleAgent(BaseAgent):
         self.formats = self.sub_config.get("formats", ["srt", "vtt"])
         self.max_chars = int(self.sub_config.get("max_chars_per_line", 42))
         self.max_duration = float(self.sub_config.get("max_subtitle_duration", 7.0))
+        self.min_duration = float(self.sub_config.get("min_subtitle_duration", 1.5))
+        self.max_merge_gap = float(self.sub_config.get("max_subtitle_merge_gap", 0.35))
         self.max_reading_speed = float(
             self.sub_config.get("max_reading_chars_per_second", 24.0)
         )
@@ -114,6 +117,7 @@ class SubtitleAgent(BaseAgent):
         subtitles_dir = self.paths.get("subtitles_dir", "output/subtitles")
         self.ensure_dir(subtitles_dir)
         topics = input_data.get("content_analysis", {}).get("topics", [])
+        full_transcript = input_data.get("full_transcript", [])
 
         for index, clip in enumerate(clips):
             clip_path = clip["path"]
@@ -131,6 +135,29 @@ class SubtitleAgent(BaseAgent):
                     vad_min_silence_ms=self.whisper_vad_min_silence_ms,
                     vocabulary_hints=self.whisper_vocabulary_hints,
                 )
+                duration = self._clip_duration(clip)
+                evidence_end = self._source_transcript_evidence_end(
+                    clip, full_transcript, duration
+                )
+                recovery_used = False
+                if self._needs_no_vad_recovery(segments, duration, evidence_end):
+                    self.log(
+                        f"Subtitle speech coverage ends at "
+                        f"{self._last_cue_end(segments):.1f}s/{duration:.1f}s; "
+                        "retrying transcription without VAD"
+                    )
+                    recovered = transcribe_audio(
+                        temp_audio,
+                        model_size=self.whisper_model,
+                        language=self.source_language,
+                        beam_size=self.whisper_beam_size,
+                        vad_filter=False,
+                        vad_min_silence_ms=self.whisper_vad_min_silence_ms,
+                        vocabulary_hints=self.whisper_vocabulary_hints,
+                    )
+                    if self._recovery_is_better(segments, recovered, evidence_end):
+                        segments = recovered
+                        recovery_used = True
             finally:
                 try:
                     os.remove(temp_audio)
@@ -145,9 +172,18 @@ class SubtitleAgent(BaseAgent):
                 continue
 
             detected = detect_language_from_segments(segments)
-            prepared = self._assign_cue_ids(self._split_long_segments(segments))
+            prepared = self._assign_cue_ids(
+                self._merge_short_segments(self._split_long_segments(segments))
+            )
             clip["detected_language"] = detected
             clip["source_subtitle_segments"] = prepared
+            clip["subtitle_transcription"] = {
+                "vad_enabled": not recovery_used,
+                "recovery_used": recovery_used,
+                "cue_count": len(prepared),
+                "last_speech_end": self._last_cue_end(prepared),
+                "clip_duration": self._clip_duration(clip),
+            }
             plans: Dict[str, Dict[str, Any]] = {}
             languages = list(dict.fromkeys([detected, *self.target_languages]))
 
@@ -188,7 +224,8 @@ class SubtitleAgent(BaseAgent):
                         + "; ".join(errors)
                     )
                 plan.update({
-                    "approved": False,
+                    "approved": True,
+                    "approval_mode": "automatic",
                     "trace_paths": trace_paths,
                     "agent": "subtitle_expert",
                     "model": self.gemini.model,
@@ -200,7 +237,7 @@ class SubtitleAgent(BaseAgent):
         return self._result(input_data, clips)
 
     def render_plans(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Render approved plans without making another translation request."""
+        """Render every valid plan without a human subtitle-approval gate."""
         clips = input_data.get("clips", [])
         subtitles_dir = self.paths.get("subtitles_dir", "output/subtitles")
         self.ensure_dir(subtitles_dir)
@@ -209,10 +246,6 @@ class SubtitleAgent(BaseAgent):
             clip_name = Path(clip.get("filename") or clip["path"]).stem
             rendered: Dict[str, Dict[str, Any]] = {}
             for language, plan in clip.get("subtitle_plans", {}).items():
-                if plan.get("approved") is False and input_data.get(
-                    "localization_review_applied", False
-                ):
-                    continue
                 segments = [
                     {
                         "start": cue["start"],
@@ -243,6 +276,7 @@ class SubtitleAgent(BaseAgent):
                     "prompt_version": plan.get("prompt_version"),
                     "trace_paths": plan.get("trace_paths", []),
                     "approved": bool(plan.get("approved", True)),
+                    "approval_mode": "automatic",
                 }
             clip["subtitles"] = rendered
         return self._result(input_data, clips)
@@ -315,6 +349,19 @@ class SubtitleAgent(BaseAgent):
             line_break = str(cue.get("line_break_text", translated)).strip()
             if not translated:
                 errors.append(f"{cue.get('cue_id')} has empty translated_text")
+            if any(
+                unicodedata.category(character) == "Cc"
+                and character not in "\n\t"
+                for character in line_break
+            ):
+                errors.append(f"{cue.get('cue_id')} contains control characters")
+            if translated and not self._uses_expected_script(
+                target_language, translated
+            ):
+                errors.append(
+                    f"{cue.get('cue_id')} is incompatible with "
+                    f"{target_language} script"
+                )
             lines = line_break.splitlines() or [""]
             if len(lines) > 2 or any(len(line) > self.max_chars for line in lines):
                 errors.append(f"{cue.get('cue_id')} exceeds line limits")
@@ -332,11 +379,6 @@ class SubtitleAgent(BaseAgent):
                 "confidence": min(1.0, max(0.0, float(cue.get("confidence", 0)))),
                 "warning": str(cue.get("warning", "")).strip(),
             })
-        combined_text = " ".join(
-            cue.get("translated_text", "") for cue in normalized["cues"]
-        )
-        if combined_text and not self._uses_expected_script(target_language, combined_text):
-            errors.append(f"translated text is incompatible with {target_language} script")
         return normalized, list(dict.fromkeys(errors))
 
     @staticmethod
@@ -398,6 +440,126 @@ class SubtitleAgent(BaseAgent):
                 })
                 current += portion
         return result
+
+    def _merge_short_segments(self, segments: List[Dict]) -> List[Dict]:
+        """Merge adjacent tiny speech fragments into TTS/readability-safe cues."""
+        merged: List[Dict[str, Any]] = []
+        index = 0
+        while index < len(segments):
+            current = {
+                "start": float(segments[index]["start"]),
+                "end": float(segments[index]["end"]),
+                "text": str(segments[index].get("text", "")).strip(),
+            }
+            index += 1
+            while (
+                current["end"] - current["start"] < self.min_duration
+                and index < len(segments)
+                and float(segments[index]["start"]) - current["end"]
+                <= self.max_merge_gap
+            ):
+                following = segments[index]
+                current["end"] = float(following["end"])
+                current["text"] = (
+                    current["text"] + " " + str(following.get("text", "")).strip()
+                ).strip()
+                index += 1
+            if (
+                current["end"] - current["start"] < self.min_duration
+                and merged
+                and current["start"] - float(merged[-1]["end"])
+                <= self.max_merge_gap
+            ):
+                merged[-1]["end"] = current["end"]
+                merged[-1]["text"] = (
+                    str(merged[-1].get("text", "")).strip()
+                    + " " + current["text"]
+                ).strip()
+            else:
+                merged.append(current)
+        return merged
+
+    @staticmethod
+    def _clip_duration(clip: Dict[str, Any]) -> float:
+        try:
+            duration = float(clip.get("duration", 0) or 0)
+            if duration <= 0:
+                duration = float(clip.get("end", 0)) - float(clip.get("start", 0))
+            return max(0.0, duration)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _last_cue_end(segments: List[Dict[str, Any]]) -> float:
+        ends = []
+        for segment in segments or []:
+            try:
+                ends.append(float(segment.get("end", 0)))
+            except (TypeError, ValueError):
+                continue
+        return max(ends, default=0.0)
+
+    @staticmethod
+    def _source_transcript_evidence_end(
+        clip: Dict[str, Any],
+        full_transcript: List[Dict[str, Any]],
+        duration: float,
+    ) -> float:
+        """Return the latest clip-relative speech time supported by the full transcript."""
+        if not full_transcript or duration <= 0 or "start" not in clip:
+            return 0.0
+        try:
+            clip_start = float(clip["start"])
+            clip_end = clip_start + duration
+        except (TypeError, ValueError):
+            return 0.0
+        latest = 0.0
+        for segment in full_transcript:
+            try:
+                start = float(segment.get("start", 0))
+                end = float(segment.get("end", 0))
+            except (TypeError, ValueError):
+                continue
+            if end > clip_start and start < clip_end and str(
+                segment.get("text", "")
+            ).strip():
+                latest = max(latest, min(duration, end - clip_start))
+        return max(0.0, latest)
+
+    @classmethod
+    def _needs_no_vad_recovery(
+        cls,
+        segments: List[Dict[str, Any]],
+        duration: float,
+        evidence_end: float,
+    ) -> bool:
+        if duration < 6.0:
+            return False
+        last_end = cls._last_cue_end(segments)
+        if evidence_end > 0:
+            return last_end + 1.0 < evidence_end
+        return last_end < duration * 0.5
+
+    @classmethod
+    def _recovery_is_better(
+        cls,
+        primary: List[Dict[str, Any]],
+        recovered: List[Dict[str, Any]],
+        evidence_end: float,
+    ) -> bool:
+        if not recovered:
+            return False
+        primary_end = cls._last_cue_end(primary)
+        recovered_end = cls._last_cue_end(recovered)
+        primary_words = sum(len(str(item.get("text", "")).split()) for item in primary)
+        recovered_words = sum(len(str(item.get("text", "")).split()) for item in recovered)
+        meaningful_extension = recovered_end >= primary_end + 1.0
+        supported_extension = not evidence_end or recovered_end <= evidence_end + 1.0
+        return (
+            meaningful_extension
+            and supported_extension
+            and recovered_words >= max(1, primary_words)
+        )
 
     @staticmethod
     def _result(input_data: Dict[str, Any], clips: List[Dict[str, Any]]) -> Dict[str, Any]:

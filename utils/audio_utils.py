@@ -92,13 +92,21 @@ EDGE_VOICES = {
 }
 
 
+def get_edge_voice(language: str) -> str:
+    """Resolve an ISO/BCP-47 language code to a compatible Edge neural voice."""
+    normalized = str(language or "").strip().replace("_", "-").lower()
+    base = normalized.split("-", 1)[0]
+    voice = EDGE_VOICES.get(normalized) or EDGE_VOICES.get(base)
+    if not voice:
+        raise ValueError(f"No Edge TTS voice mapped for language '{language}'")
+    return voice
+
+
 def _edge_tts_save(text: str, output_path: str, lang: str) -> None:
     """Synthesize speech with Microsoft Edge TTS and save to output_path."""
     import edge_tts
 
-    voice = EDGE_VOICES.get(lang, EDGE_VOICES.get(lang.split("-")[0]))
-    if not voice:
-        raise ValueError(f"No Edge TTS voice mapped for language '{lang}'")
+    voice = get_edge_voice(lang)
 
     async def _run():
         communicate = edge_tts.Communicate(text, voice)
@@ -292,11 +300,36 @@ def normalize_audio_to_wav(input_path: str, output_path: str) -> str:
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     command = [
         imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-i", input_path,
+        "-af", _EDGE_SILENCE_TRIM_FILTER,
         "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", output_path,
     ]
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"Audio normalization failed: {result.stderr[:500]}")
+    return output_path
+
+
+_EDGE_SILENCE_TRIM_FILTER = (
+    "silenceremove=start_periods=1:start_silence=0.03:start_threshold=-50dB,"
+    "areverse,"
+    "silenceremove=start_periods=1:start_silence=0.03:start_threshold=-50dB,"
+    "areverse"
+)
+
+
+def trim_audio_silence(input_path: str, output_path: str) -> str:
+    """Trim only leading/trailing digital silence while retaining speech pauses."""
+    import imageio_ffmpeg
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-i", input_path,
+        "-af", _EDGE_SILENCE_TRIM_FILTER,
+        "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", output_path,
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Audio silence trim failed: {result.stderr[:500]}")
     return output_path
 
 

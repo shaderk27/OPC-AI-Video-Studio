@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List
@@ -125,6 +126,7 @@ class GeminiContentAnalyzer:
         self.timeout_ms = max(
             1000, int(float(settings.get("timeout_seconds", 120)) * 1000)
         )
+        self.transport_retries = max(0, int(settings.get("transport_retries", 2)))
         self.chunk_max_chars = max(2000, int(settings.get("chunk_max_chars", 50000)))
         self.max_topics = max(1, int(settings.get("max_topics", 8)))
         self.max_key_moments = max(1, int(settings.get("max_key_moments", 12)))
@@ -175,21 +177,11 @@ class GeminiContentAnalyzer:
                 local_topics=local_topics,
                 local_summary=local_summary,
             )
-            try:
-                response = self._get_client().models.generate_content(
-                    model=self.model,
-                    contents=prompt,
-                    config={
-                        "response_mime_type": "application/json",
-                        "response_json_schema": CONTENT_ANALYSIS_SCHEMA,
-                        "temperature": 0,
-                    },
-                )
-            except Exception as exc:
-                raise GeminiContentAnalysisError(
-                    f"Gemini transcript analysis failed for chunk {index + 1}/"
-                    f"{len(chunks)}: {exc}"
-                ) from exc
+            response = self._generate_with_transport_retry(
+                prompt,
+                chunk_number=index + 1,
+                chunk_count=len(chunks),
+            )
 
             parsed = getattr(response, "parsed", None)
             if not isinstance(parsed, dict):
@@ -202,6 +194,75 @@ class GeminiContentAnalyzer:
             analyses.append(self._validate_analysis(parsed, duration_seconds))
 
         return self._merge_analyses(analyses)
+
+    def _generate_with_transport_retry(
+        self,
+        prompt: str,
+        *,
+        chunk_number: int,
+        chunk_count: int,
+    ) -> Any:
+        """Retry transient network failures without masking API/config errors."""
+        max_attempts = self.transport_retries + 1
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return self._get_client().models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                    config={
+                        "response_mime_type": "application/json",
+                        "response_json_schema": CONTENT_ANALYSIS_SCHEMA,
+                        "temperature": 0,
+                    },
+                )
+            except Exception as exc:
+                transient = self._is_transient_transport_error(exc)
+                if transient and attempt < max_attempts:
+                    time.sleep(min(4.0, float(2 ** (attempt - 1))))
+                    continue
+
+                detail = str(exc)
+                if transient:
+                    detail = (
+                        f"network connection failed after {attempt} attempts: {detail}. "
+                        "Check DNS/internet access to generativelanguage.googleapis.com "
+                        "and retry the run"
+                    )
+                raise GeminiContentAnalysisError(
+                    f"Gemini transcript analysis failed for chunk {chunk_number}/"
+                    f"{chunk_count}: {detail}"
+                ) from exc
+
+        raise AssertionError("Gemini transport retry loop exited unexpectedly")
+
+    @staticmethod
+    def _is_transient_transport_error(exc: Exception) -> bool:
+        """Recognize retryable DNS, connection, TLS and timeout failures."""
+        retryable_markers = (
+            "getaddrinfo failed",
+            "name or service not known",
+            "temporary failure in name resolution",
+            "nodename nor servname provided",
+            "connection reset",
+            "connection aborted",
+            "connection refused",
+            "server disconnected",
+            "network is unreachable",
+            "timed out",
+            "timeout",
+            "ssl eof",
+            "unexpected eof",
+        )
+        seen = set()
+        current: Any = exc
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if any(marker in str(current).lower() for marker in retryable_markers):
+                return True
+            current = getattr(current, "__cause__", None) or getattr(
+                current, "__context__", None
+            )
+        return False
 
     def _get_client(self):
         if self._client is None:

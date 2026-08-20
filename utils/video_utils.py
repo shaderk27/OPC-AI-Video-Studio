@@ -10,6 +10,7 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -451,26 +452,38 @@ def burn_subtitles_into_video(
     """
     Burn subtitle file (SRT) directly into video (hardcoded subtitles).
     """
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    output = Path(output_path).resolve()
+    source_video = Path(video_path).resolve()
+    source_subtitle = Path(subtitle_path).resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if not source_subtitle.is_file():
+        raise FileNotFoundError(f"Subtitle file not found: {source_subtitle}")
 
-    # Escape Windows path separators for ffmpeg subtitles filter
-    sub_path_escaped = subtitle_path.replace("\\", "/").replace(":", "\\:")
+    # FFmpeg's subtitles filter parses ':' and '\\' as filter syntax on Windows.
+    # A unique cwd-relative copy avoids drive-letter, spaces, apostrophe and
+    # concurrent-render collisions without relying on fragile escape sequences.
+    with tempfile.TemporaryDirectory(
+        prefix="subtitle-burn-", dir=str(output.parent)
+    ) as temp_dir:
+        local_subtitle = Path(temp_dir) / f"subtitle{source_subtitle.suffix or '.srt'}"
+        shutil.copy2(source_subtitle, local_subtitle)
+        cmd = [
+            FFMPEG_PATH, "-y",
+            "-i", str(source_video),
+            "-vf", f"subtitles='{local_subtitle.name}'",
+            "-c:v", "libx264", "-preset", "fast",
+            "-c:a", "copy",
+            "-movflags", "+faststart",
+            str(output),
+        ]
 
-    cmd = [
-        FFMPEG_PATH, "-y",
-        "-i", video_path,
-        "-vf", f"subtitles='{sub_path_escaped}'",
-        "-c:v", "libx264", "-preset", "fast",
-        "-c:a", "copy",
-        "-movflags", "+faststart",
-        output_path,
-    ]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, cwd=temp_dir
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Subtitle burn failed: {result.stderr[:500]}")
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"Subtitle burn failed: {result.stderr[:500]}")
-
-    return output_path
+    return str(output)
 
 
 def extract_frame(video_path: str, timestamp: float, output_path: str) -> str:

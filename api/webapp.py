@@ -164,7 +164,7 @@ def _defaults(cfg: dict) -> dict:
     qa = cfg.get("quality_agent", {})
     return {
         "subtitle_languages": sub.get("target_languages", ["en"]),
-        "subtitle_mode": "separate",
+        "subtitle_mode": "both",
         "subtitle_formats": sub.get("formats", ["srt", "vtt"]),
         "audio_languages": aud.get("target_languages", ["zh"]),
         "tts_engine": "gemini",
@@ -184,7 +184,7 @@ def _defaults(cfg: dict) -> dict:
         "voiceover_volume": aud.get("voiceover_volume", 1.0),
         "tts_speed": aud.get("tts_speed", 1.0),
         "localization_review_enabled": cfg.get("manager_agent", {}).get(
-            "localization_review_enabled", True
+            "localization_review_enabled", False
         ),
         "thumbnail_enabled": True,
         "social_tone": cfg.get("social_media_agent", {}).get("tone", "energetic"),
@@ -265,7 +265,7 @@ class WebRunRequest(BaseModel):
     video: str
     languages: Optional[List[str]] = None
     subtitle_languages: Optional[List[str]] = None
-    subtitle_mode: str = "separate"           # separate | burn | both
+    subtitle_mode: str = "both"               # separate | burn | both
     subtitle_formats: Optional[List[str]] = None
     audio_languages: Optional[List[str]] = None
     tts_engine: Optional[str] = None
@@ -470,12 +470,6 @@ def _run_worker(run_id: str, req: WebRunRequest):
             run["localization_decision"] = None
             run["localization_event"].clear()
             run["status"] = "awaiting_localization_review"
-            _emit(run, "subtitle_plan_ready", {
-                "count": sum(
-                    1 for item in payload.get("items", [])
-                    if item.get("subtitle_plan")
-                )
-            })
             _emit(run, "audio_plan_ready", {
                 "count": sum(
                     1 for item in payload.get("items", [])
@@ -484,7 +478,7 @@ def _run_worker(run_id: str, req: WebRunRequest):
             })
             _emit(run, "localization_review_ready", {
                 "count": payload.get("count", 0),
-                "message": "Review subtitle and dubbing scripts before rendering",
+                "message": "Review voiceover scripts before audio rendering",
             })
             run["localization_event"].wait()
             decision = run.get("localization_decision") or {"items": []}
@@ -503,11 +497,7 @@ def _run_worker(run_id: str, req: WebRunRequest):
             skip_stages=skip,
             on_stage=on_stage,
             on_review=on_review,
-            on_localization_review=(
-                on_localization_review
-                if cfg.get("manager_agent", {}).get("localization_review_enabled", True)
-                else None
-            ),
+            on_localization_review=None,
         )
 
         # load manifest + quality FIRST (the burn pass reads the manifest)
@@ -540,13 +530,7 @@ def _run_worker(run_id: str, req: WebRunRequest):
                     })
                     warned_separation = True
 
-        # burn-in pass (embed subtitles into video) if requested
-        if req.subtitle_mode in ("burn", "both"):
-            _burn_subtitles(
-                run,
-                cfg,
-                req.subtitle_languages or req.languages or ["en"],
-            )
+        _compose_final_videos(run, cfg, req)
 
         run["status"] = "completed"
         run["elapsed"] = round(time.time() - start, 1)
@@ -562,6 +546,181 @@ def _run_worker(run_id: str, req: WebRunRequest):
         _emit(run, "run_failed", {"run_id": run_id, "error": run["error"]})
     finally:
         ACTIVE_RUN["busy"] = False
+
+
+def _path_value(value: Any) -> str:
+    """Return a path from either the manifest's string or object form."""
+    if isinstance(value, dict):
+        return str(value.get("path", ""))
+    return str(value or "")
+
+
+def _safe_artifact_part(value: Optional[str], fallback: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "-", str(value or "")).strip("-")
+    return cleaned or fallback
+
+
+def _compose_final_videos(run: dict, cfg: dict, req: WebRunRequest):
+    """Create delivery videos containing the chosen format, dub and subtitles.
+
+    Intermediate source, formatted, dubbed and subtitle artifacts remain
+    available for diagnostics/downloads, but the gallery consumes only this
+    explicit final-video collection.
+    """
+    from utils.video_utils import burn_subtitles_into_video
+
+    manifest = run.get("manifest") or {}
+    clips = manifest.get("clips") or []
+    if not clips:
+        manifest["final_videos"] = []
+        return
+
+    out_dir = Path(cfg.get("paths", {}).get("output_dir", "output"))
+    final_dir = out_dir / "final"
+    final_dir.mkdir(parents=True, exist_ok=True)
+
+    configured_formats = {
+        item.get("platform"): item
+        for item in cfg.get("format_agent", {}).get("formats", [])
+        if item.get("platform") and item.get("enabled", True)
+    }
+    format_requested = "format" in run.get("active_stages", [])
+    selected_formats = ([
+        platform for platform in (req.formats or configured_formats.keys())
+        if platform in configured_formats
+    ] or [None]) if format_requested else [None]
+    subtitle_requested = "subtitle" in run.get("active_stages", [])
+    audio_requested = "audio" in run.get("active_stages", [])
+    subtitle_languages = (
+        list(
+            req.subtitle_languages
+            or req.languages
+            or cfg.get("subtitle_agent", {}).get("target_languages", [])
+        )
+        if subtitle_requested else []
+    )
+    audio_languages = (
+        list(
+            req.audio_languages
+            or req.languages
+            or cfg.get("audio_agent", {}).get("target_languages", [])
+        )
+        if audio_requested else []
+    )
+    subtitle_targets = subtitle_languages or [None]
+    audio_targets = audio_languages or [None]
+    final_videos = []
+
+    for clip_index, clip in enumerate(clips, 1):
+        clip_finals = []
+        source_path = _path_value(clip.get("path"))
+        stem = Path(source_path or clip.get("filename") or f"clip-{clip_index}").stem
+
+        for platform in selected_formats:
+            platform_info = configured_formats.get(platform, {})
+            for audio_language in audio_targets:
+                audio_data = (clip.get("audio_translations") or {}).get(
+                    audio_language, {}
+                ) if audio_language else {}
+                if audio_language and not audio_data:
+                    _emit(run, "stage_log", {
+                        "stage": "format",
+                        "message": (
+                            f"  final: no {audio_language} dub for "
+                            f"{clip.get('filename', stem)}"
+                        ),
+                    })
+                    continue
+
+                formatted_audio = _path_value(
+                    (audio_data.get("formatted_versions") or {}).get(platform)
+                ) if platform else ""
+                formatted_source = _path_value(
+                    (clip.get("platform_versions") or {}).get(platform)
+                ) if platform else ""
+                if platform and audio_language:
+                    base_path = formatted_audio
+                elif platform:
+                    base_path = formatted_source
+                elif audio_language:
+                    base_path = _path_value(audio_data.get("video_path"))
+                else:
+                    base_path = source_path
+                if not base_path or not os.path.exists(base_path):
+                    raise RuntimeError(
+                        "Final video input is missing for "
+                        f"{clip.get('filename', stem)} "
+                        f"(platform={platform or 'original'}, "
+                        f"audio={audio_language or 'source'})"
+                    )
+
+                for subtitle_language in subtitle_targets:
+                    subtitle_path = ""
+                    if subtitle_language:
+                        subtitle_path = _path_value(
+                            ((clip.get("subtitles") or {})
+                             .get(subtitle_language, {})
+                             .get("formats", {})
+                             .get("srt"))
+                        )
+                        if not subtitle_path or not os.path.exists(subtitle_path):
+                            _emit(run, "stage_log", {
+                                "stage": "format",
+                                "message": (
+                                    f"  final: no {subtitle_language} SRT for "
+                                    f"{clip.get('filename', stem)}"
+                                ),
+                            })
+                            continue
+
+                    platform_part = _safe_artifact_part(platform, "original")
+                    audio_part = _safe_artifact_part(audio_language, "source")
+                    subtitle_part = _safe_artifact_part(subtitle_language, "none")
+                    filename = (
+                        f"{_safe_artifact_part(stem, f'clip-{clip_index}')}_"
+                        f"{platform_part}_audio-{audio_part}_sub-{subtitle_part}.mp4"
+                    )
+                    final_path = final_dir / filename
+                    if subtitle_path and req.subtitle_mode in ("burn", "both"):
+                        burn_subtitles_into_video(
+                            base_path, subtitle_path, str(final_path)
+                        )
+                        subtitle_delivery = "burned"
+                    else:
+                        shutil.copy2(base_path, final_path)
+                        subtitle_delivery = "separate" if subtitle_path else "none"
+
+                    artifact = {
+                        "clip_index": clip_index,
+                        "clip_filename": clip.get("filename", Path(source_path).name),
+                        "title": clip.get("title", ""),
+                        "duration": clip.get("duration", 0),
+                        "filename": filename,
+                        "path": str(final_path),
+                        "platform": platform or "Original ratio",
+                        "aspect_ratio": platform_info.get("aspect_ratio", "original"),
+                        "audio_language": audio_language,
+                        "subtitle_language": subtitle_language,
+                        "subtitle_delivery": subtitle_delivery,
+                    }
+                    clip_finals.append(artifact)
+                    final_videos.append(artifact)
+                    _emit(run, "stage_log", {
+                        "stage": "format",
+                        "message": f"  final OK: {filename}",
+                    })
+
+        clip["final_videos"] = clip_finals
+
+    if clips and not final_videos:
+        raise RuntimeError(
+            "No final videos were created from the selected format, audio and subtitle options"
+        )
+
+    manifest["final_videos"] = final_videos
+    manifest_path = out_dir / "manifest.json"
+    with open(manifest_path, "w", encoding="utf-8") as file:
+        json.dump(manifest, file, indent=2, ensure_ascii=False)
 
 
 def _burn_subtitles(run: dict, cfg: dict, langs: list):
@@ -676,6 +835,19 @@ def api_run(req: WebRunRequest):
     if req.source_language and req.source_language not in supported_languages:
         raise HTTPException(400, f"Unsupported source language code: {req.source_language}")
     requested_stages = set(req.stages or _defaults(cfg)["stages"])
+    effective_gemini_required = (
+        req.gemini_required
+        if req.gemini_required is not None
+        else _defaults(cfg)["gemini_required"]
+    )
+    if effective_gemini_required and req.stages is not None:
+        missing = {"content_analysis", "clip"} - requested_stages
+        if missing:
+            raise HTTPException(
+                400,
+                "Require Gemini API also requires Content Analyzer and "
+                "Clip Expert stages.",
+            )
     localization_selected = bool(requested_stages & {"subtitle", "audio"})
     if localization_selected:
         from agents.subtitle_agent import SubtitleAgent
@@ -691,22 +863,7 @@ def api_run(req: WebRunRequest):
                 "Gemini localization experts are required but not configured: "
                 + localization_error,
             )
-    effective_gemini_required = (
-        req.gemini_required
-        if req.gemini_required is not None
-        else _defaults(cfg)["gemini_required"]
-    )
     if effective_gemini_required:
-        if req.stages is not None:
-            missing = {
-                "content_analysis", "clip"
-            } - set(req.stages)
-            if missing:
-                raise HTTPException(
-                    400,
-                    "Require Gemini API also requires Content Analyzer and "
-                    "Clip Expert stages.",
-                )
         gemini = cfg.setdefault("clip_agent", {}).setdefault("gemini_review", {})
         gemini.update({"enabled": True, "required": True})
         content_gemini = cfg.setdefault("content_analyzer", {}).setdefault(
@@ -989,7 +1146,7 @@ def api_run_downloads(run_id: str):
         except ValueError:
             return "/" + str(path).replace("\\", "/").lstrip("/")
 
-    clips, subtitles, formatted, burned, audio, thumbs, social = [], [], [], [], [], [], []
+    clips, subtitles, formatted, burned, audio, final, thumbs, social = [], [], [], [], [], [], [], []
 
     # map platform -> aspect_ratio from config (manifest only stores paths)
     ratio_of = {}
@@ -1032,9 +1189,17 @@ def api_run_downloads(run_id: str):
     if burned_dir.exists():
         for p in sorted(burned_dir.glob("*.mp4")):
             burned.append({"filename": p.name, "url": url(p)})
+    for artifact in run["manifest"].get("final_videos", []):
+        final_path = _path_value(artifact.get("path"))
+        if final_path and os.path.exists(final_path):
+            final.append({
+                **artifact,
+                "filename": artifact.get("filename") or os.path.basename(final_path),
+                "url": url(final_path),
+            })
     social_dir = out_dir / "social"
     if social_dir.exists():
         for p in sorted(social_dir.glob("*.json")):
             social.append(url(p))
     return {"clips": clips, "subtitles": subtitles, "audio": audio, "formatted": formatted,
-            "burned": burned, "thumbnails": thumbs, "social": social}
+            "burned": burned, "final": final, "thumbnails": thumbs, "social": social}

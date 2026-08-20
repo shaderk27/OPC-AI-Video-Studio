@@ -48,6 +48,8 @@ content_analyzer:
     required: true
     model: "gemini-3.5-flash-lite"
     timeout_seconds: 120
+    # Retry transient DNS/TLS/connection failures before failing a required run.
+    transport_retries: 2
     chunk_max_chars: 50000
     max_topics: 8
     max_key_moments: 12
@@ -147,6 +149,7 @@ subtitle_agent:
     model: "gemini-3.5-flash-lite"
     prompt_version: "subtitle-v1"
     timeout_seconds: 60
+    transport_retries: 2
   # Accuracy controls shared by Content Analyzer, Clip Expert and subtitles.
   beam_size: 5
   vad_filter: true
@@ -175,6 +178,10 @@ subtitle_agent:
   max_chars_per_line: 42
   # Maximum duration per subtitle (seconds)
   max_subtitle_duration: 7.0
+  # Adjacent tiny Whisper fragments are merged to keep subtitles readable and
+  # give TTS enough room without changing the outer speech timestamps.
+  min_subtitle_duration: 1.5
+  max_subtitle_merge_gap: 0.35
   max_reading_chars_per_second: 24.0
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -188,6 +195,7 @@ audio_agent:
     model: "gemini-3.5-flash-lite"
     prompt_version: "audio-v1"
     timeout_seconds: 60
+    transport_retries: 2
   # Target languages for audio translation (ISO 639-1 codes)
   target_languages:
     - "en"
@@ -327,7 +335,8 @@ manager_agent:
   stage_timeout: 300
   # Pause after Clip stage for human review of generated clips
   review_gate_enabled: true
-  localization_review_enabled: true
+  # Subtitle and dubbing plans are approved automatically; no localization pause.
+  localization_review_enabled: false
   # Seconds before auto-approval. 0 means wait for an explicit human decision.
   review_gate_timeout: 0
   # Core stages — failure here stops the entire pipeline

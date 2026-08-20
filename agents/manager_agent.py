@@ -101,7 +101,7 @@ class ManagerAgent(BaseAgent):
         self.review_gate_enabled: bool = mgr_config.get("review_gate_enabled", True)
         self.review_gate_timeout: int = mgr_config.get("review_gate_timeout", 300)
         self.localization_review_enabled: bool = mgr_config.get(
-            "localization_review_enabled", True
+            "localization_review_enabled", False
         )
         self.core_stages: set = set(
             mgr_config.get("core_stages", list(DEFAULT_CORE_STAGES))
@@ -190,9 +190,7 @@ class ManagerAgent(BaseAgent):
             if not succeeded and stage in self.core_stages:
                 break
             active = [item for item in self.pipeline if item not in skip_stages]
-            if succeeded and stage == "subtitle" and "audio" not in active:
-                self._finalize_localization(pipeline_data, results)
-            elif succeeded and stage == "audio":
+            if succeeded and stage == "audio":
                 self._finalize_localization(pipeline_data, results)
 
         # Build final manifest
@@ -251,7 +249,10 @@ class ManagerAgent(BaseAgent):
 
                 if stage in ("subtitle", "audio") and hasattr(agent, "create_plans"):
                     result = agent.create_plans(pipeline_data)
-                    self._localization_agents[stage] = agent
+                    if stage == "subtitle":
+                        result = agent.render_plans(result)
+                    else:
+                        self._localization_agents[stage] = agent
                 else:
                     result = agent.run(pipeline_data)
 
@@ -485,7 +486,7 @@ class ManagerAgent(BaseAgent):
         pipeline_data: Dict[str, Any],
         results: Dict[str, Any],
     ) -> None:
-        """Run the combined human gate, then render both approved expert plans."""
+        """Automatically approve and render validated dubbing plans."""
         from utils.localization_review import (
             apply_localization_review,
             approve_all,
@@ -493,22 +494,7 @@ class ManagerAgent(BaseAgent):
         )
 
         payload = build_localization_review(pipeline_data.get("clips", []))
-        if self.localization_review_enabled and payload.get("items"):
-            self.localization_review_gate.clear()
-            self.approved_localization = None
-            self._awaiting_localization_review = True
-            self._emit("subtitle_plan_ready", {
-                "count": sum(bool(item.get("subtitle_plan")) for item in payload["items"]),
-            })
-            self._emit("audio_plan_ready", {
-                "count": sum(bool(item.get("dubbing_plan")) for item in payload["items"]),
-            })
-            self._emit("localization_review_ready", payload)
-            self.localization_review_gate.wait()
-            decision = self.approved_localization or {"items": []}
-            self._awaiting_localization_review = False
-        else:
-            decision = approve_all(payload)
+        decision = approve_all(payload)
 
         pipeline_data["clips"] = apply_localization_review(
             pipeline_data.get("clips", []), decision
@@ -520,7 +506,7 @@ class ManagerAgent(BaseAgent):
                 bool(item.get("approved")) for item in decision.get("items", [])
             ),
         })
-        for stage in ("subtitle", "audio"):
+        for stage in ("audio",):
             agent = self._localization_agents.get(stage)
             if agent is None:
                 continue
@@ -715,6 +701,13 @@ class ManagerAgent(BaseAgent):
                     clip_manifest["audio_translations"][lang] = {
                         "video_path": lang_data.get("video_path", ""),
                         "voiceover_path": lang_data.get("voiceover_path", ""),
+                        "formatted_versions": {
+                            platform: version.get("path", "")
+                            for platform, version in lang_data.get(
+                                "formatted_versions", {}
+                            ).items()
+                            if isinstance(version, dict) and version.get("path")
+                        },
                         "tts_provider": lang_data.get("tts_provider", ""),
                         "tts_fallback_used": lang_data.get("tts_fallback_used", False),
                         "separation": lang_data.get("separation", {}),
@@ -724,6 +717,9 @@ class ManagerAgent(BaseAgent):
                         "approved": lang_data.get("approved", False),
                         "trace_paths": lang_data.get("trace_paths", []),
                     }
+
+            if clip.get("audio_failures"):
+                clip_manifest["audio_failures"] = clip["audio_failures"]
 
             if clip.get("thumbnails"):
                 clip_manifest["thumbnails"] = [

@@ -13,9 +13,11 @@ from utils.audio_utils import (
     adjust_audio_speed,
     build_aligned_voiceover,
     gemini_text_to_speech,
+    get_edge_voice,
     get_audio_duration,
     normalize_audio_to_wav,
     text_to_speech,
+    trim_audio_silence,
 )
 from utils.gemini_agent_client import GeminiAgentClient, GeminiAgentError
 from utils.video_utils import get_video_info, merge_voiceover_with_background
@@ -197,55 +199,69 @@ class AudioAgent(BaseAgent):
                 }
 
             translations: Dict[str, Dict[str, Any]] = {}
+            failures: Dict[str, Dict[str, Any]] = {}
             for language, plan in clip.get("dubbing_plans", {}).items():
                 if plan.get("approved") is False and input_data.get(
                     "localization_review_applied", False
                 ):
                     continue
-                cue_audio: List[Dict[str, Any]] = []
-                provider_counts = {"gemini": 0, "edge": 0}
-                for cue in plan.get("cues", []):
-                    rendered = self._render_cue(
-                        cue, clip_name, language, plan, audio_dir
+                try:
+                    cue_audio: List[Dict[str, Any]] = []
+                    provider_counts = {"gemini": 0, "edge": 0}
+                    for cue in plan.get("cues", []):
+                        rendered = self._render_cue(
+                            cue, clip_name, language, plan, audio_dir
+                        )
+                        cue_audio.append(rendered)
+                        provider_counts[rendered["provider"]] += 1
+                    aligned_path = os.path.join(
+                        audio_dir, f"{clip_name}_voiceover_{language}_aligned.wav"
                     )
-                    cue_audio.append(rendered)
-                    provider_counts[rendered["provider"]] += 1
-                aligned_path = os.path.join(
-                    audio_dir, f"{clip_name}_voiceover_{language}_aligned.wav"
-                )
-                build_aligned_voiceover(cue_audio, aligned_path, duration)
-                video_filename = f"{clip_name}_{language}_dubbed.mp4"
-                video_path = os.path.join(audio_dir, video_filename)
-                merge_voiceover_with_background(
-                    video_path=clip_path,
-                    voiceover_path=aligned_path,
-                    output_path=video_path,
-                    background_path=background_path,
-                    cue_windows=plan.get("cues", []),
-                    background_volume=self.background_volume,
-                    voiceover_volume=self.voiceover_volume,
-                    original_audio_volume=self.original_audio_volume,
-                )
-                translations[language] = {
-                    "video_path": video_path,
-                    "video_filename": video_filename,
-                    "voiceover_path": aligned_path,
-                    "voiceover_filename": Path(aligned_path).name,
-                    "tts_provider": (
-                        "mixed" if all(provider_counts.values())
-                        else "edge" if provider_counts["edge"] else "gemini"
-                    ),
-                    "tts_fallback_used": provider_counts["edge"] > 0,
-                    "tts_provider_counts": provider_counts,
-                    "separation": separation,
-                    "trace_paths": plan.get("trace_paths", []),
-                    "approved": bool(plan.get("approved", True)),
-                    "cues": cue_audio,
-                    "agent": plan.get("agent"),
-                    "model": plan.get("model"),
-                    "prompt_version": plan.get("prompt_version"),
-                }
+                    build_aligned_voiceover(cue_audio, aligned_path, duration)
+                    video_filename = f"{clip_name}_{language}_dubbed.mp4"
+                    video_path = os.path.join(audio_dir, video_filename)
+                    merge_voiceover_with_background(
+                        video_path=clip_path,
+                        voiceover_path=aligned_path,
+                        output_path=video_path,
+                        background_path=background_path,
+                        cue_windows=plan.get("cues", []),
+                        background_volume=self.background_volume,
+                        voiceover_volume=self.voiceover_volume,
+                        original_audio_volume=self.original_audio_volume,
+                    )
+                    translations[language] = {
+                        "video_path": video_path,
+                        "video_filename": video_filename,
+                        "voiceover_path": aligned_path,
+                        "voiceover_filename": Path(aligned_path).name,
+                        "tts_provider": (
+                            "mixed" if all(provider_counts.values())
+                            else "edge" if provider_counts["edge"] else "gemini"
+                        ),
+                        "tts_fallback_used": provider_counts["edge"] > 0,
+                        "tts_provider_counts": provider_counts,
+                        "separation": separation,
+                        "trace_paths": plan.get("trace_paths", []),
+                        "approved": bool(plan.get("approved", True)),
+                        "cues": cue_audio,
+                        "agent": plan.get("agent"),
+                        "model": plan.get("model"),
+                        "prompt_version": plan.get("prompt_version"),
+                    }
+                except Exception as exc:
+                    failures[language] = {
+                        "error": str(exc),
+                        "agent": plan.get("agent", "audio_expert"),
+                        "model": plan.get("model", self.gemini.model),
+                        "trace_paths": plan.get("trace_paths", []),
+                    }
+                    self.log(
+                        f"  {clip_name}/{language}: dubbing skipped - {exc}",
+                        "warning",
+                    )
             clip["audio_translations"] = translations
+            clip["audio_failures"] = failures
             clip["audio_separation"] = separation
         return self._result(input_data, clips)
 
@@ -277,12 +293,16 @@ class AudioAgent(BaseAgent):
             shortened = True
         speed = 1.0
         if actual > window + 0.1:
-            speed = actual / window
-            if speed > self.max_speed:
+            required_speed = actual / window
+            # Duration probes and TTS encoders commonly differ by a few
+            # milliseconds. Treat a reported 1.200... ratio as the supported
+            # 1.20x boundary instead of rejecting the entire language output.
+            if required_speed > self.max_speed + 0.01:
                 raise RuntimeError(
                     f"Dubbing cue {clip_name}/{language}/{cue_id} is "
                     f"{actual:.2f}s for a {window:.2f}s window after shortening"
                 )
+            speed = min(required_speed, self.max_speed)
             adjusted = os.path.join(
                 audio_dir, f"{clip_name}_{language}_{cue_id}_speed.wav"
             )
@@ -331,6 +351,9 @@ class AudioAgent(BaseAgent):
                 model=self.tts_model,
                 client=self.gemini._get_client(),
             )
+            trimmed_path = os.path.join(audio_dir, stem + "_trimmed.wav")
+            trim_audio_silence(wav_path, trimmed_path)
+            os.replace(trimmed_path, wav_path)
             trace = self.gemini.record_tool_call(
                 tool="gemini_tts",
                 clip_id=clip_name,
@@ -360,6 +383,11 @@ class AudioAgent(BaseAgent):
                 raise RuntimeError(f"Gemini TTS failed: {gemini_error}") from gemini_error
             edge_path = os.path.join(audio_dir, stem + "_edge.mp3")
             edge_started = time.monotonic()
+            edge_payload = {
+                **payload,
+                "voice": get_edge_voice(language),
+                "provider": "edge",
+            }
             try:
                 text_to_speech(
                     text,
@@ -374,7 +402,7 @@ class AudioAgent(BaseAgent):
                     tool="edge_tts",
                     clip_id=clip_name,
                     language=language,
-                    payload=payload,
+                    payload=edge_payload,
                     status="failed",
                     latency_seconds=time.monotonic() - edge_started,
                     model="edge-tts",
@@ -389,11 +417,15 @@ class AudioAgent(BaseAgent):
                 tool="edge_tts",
                 clip_id=clip_name,
                 language=language,
-                payload=payload,
+                payload=edge_payload,
                 status="complete",
                 latency_seconds=time.monotonic() - edge_started,
                 model="edge-tts",
-                result={"output": Path(wav_path).name, "provider": "edge"},
+                result={
+                    "output": Path(wav_path).name,
+                    "provider": "edge",
+                    "voice": edge_payload["voice"],
+                },
                 fallback_used=True,
             )
             plan.setdefault("trace_paths", []).append(edge_trace)

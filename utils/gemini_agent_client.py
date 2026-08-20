@@ -47,6 +47,7 @@ class GeminiAgentClient:
         self.model = settings.get("model", "gemini-3.5-flash-lite")
         self.prompt_version = str(settings.get("prompt_version", "1.0"))
         self.timeout_ms = max(1000, int(settings.get("timeout_seconds", 60) * 1000))
+        self.transport_retries = max(0, int(settings.get("transport_retries", 2)))
         self.api_key = os.environ.get("GEMINI_API_KEY", "").strip()
         self._client = client
 
@@ -96,58 +97,76 @@ class GeminiAgentClient:
             "status": "started",
         }
 
-        try:
-            response = self._get_client().models.generate_content(
-                model=self.model,
-                contents=serialized,
-                config={
-                    "system_instruction": self.system_instruction,
-                    "response_mime_type": "application/json",
-                    "response_json_schema": self.schema,
-                },
-            )
-            parsed = getattr(response, "parsed", None)
-            if not isinstance(parsed, dict):
-                try:
-                    parsed = json.loads(getattr(response, "text", "") or "")
-                except (TypeError, json.JSONDecodeError) as exc:
-                    raise GeminiAgentError("Gemini returned invalid JSON") from exc
-            if not isinstance(parsed, dict):
-                raise GeminiAgentError("Gemini returned a non-object response")
-            trace.update({
-                "status": "complete",
-                "result": parsed,
-                "latency_seconds": round(time.monotonic() - started, 3),
-            })
-            usage = getattr(response, "usage_metadata", None)
-            if usage is not None:
-                trace["usage"] = {
-                    name: getattr(usage, name, None)
-                    for name in (
-                        "prompt_token_count", "candidates_token_count",
-                        "total_token_count",
-                    )
-                    if getattr(usage, name, None) is not None
-                }
-            trace_path = self._write_trace(trace)
-            return parsed, trace_path
-        except GeminiAgentError as exc:
-            trace.update({
-                "status": "failed",
-                "error": str(exc),
-                "latency_seconds": round(time.monotonic() - started, 3),
-            })
-            self._write_trace(trace)
-            raise
-        except Exception as exc:
-            wrapped = GeminiAgentError(f"Gemini request failed: {exc}")
-            trace.update({
-                "status": "failed",
-                "error": str(wrapped),
-                "latency_seconds": round(time.monotonic() - started, 3),
-            })
-            self._write_trace(trace)
-            raise wrapped from exc
+        trace["transport_attempts"] = []
+        max_attempts = self.transport_retries + 1
+        last_error: Optional[Exception] = None
+        for attempt in range(1, max_attempts + 1):
+            attempt_started = time.monotonic()
+            try:
+                response = self._get_client().models.generate_content(
+                    model=self.model,
+                    contents=serialized,
+                    config={
+                        "system_instruction": self.system_instruction,
+                        "response_mime_type": "application/json",
+                        "response_json_schema": self.schema,
+                    },
+                )
+                parsed = getattr(response, "parsed", None)
+                if not isinstance(parsed, dict):
+                    try:
+                        parsed = json.loads(getattr(response, "text", "") or "")
+                    except (TypeError, json.JSONDecodeError) as exc:
+                        raise GeminiAgentError("Gemini returned invalid JSON") from exc
+                if not isinstance(parsed, dict):
+                    raise GeminiAgentError("Gemini returned a non-object response")
+                trace["transport_attempts"].append({
+                    "attempt": attempt,
+                    "status": "complete",
+                    "latency_seconds": round(time.monotonic() - attempt_started, 3),
+                })
+                trace.update({
+                    "status": "complete",
+                    "result": parsed,
+                    "latency_seconds": round(time.monotonic() - started, 3),
+                })
+                usage = getattr(response, "usage_metadata", None)
+                if usage is not None:
+                    trace["usage"] = {
+                        name: getattr(usage, name, None)
+                        for name in (
+                            "prompt_token_count", "candidates_token_count",
+                            "total_token_count",
+                        )
+                        if getattr(usage, name, None) is not None
+                    }
+                trace_path = self._write_trace(trace)
+                return parsed, trace_path
+            except Exception as exc:
+                last_error = exc
+                trace["transport_attempts"].append({
+                    "attempt": attempt,
+                    "status": "failed",
+                    "error": str(exc),
+                    "latency_seconds": round(time.monotonic() - attempt_started, 3),
+                })
+                if attempt < max_attempts:
+                    time.sleep(min(4.0, float(2 ** (attempt - 1))))
+
+        wrapped = (
+            last_error
+            if isinstance(last_error, GeminiAgentError)
+            else GeminiAgentError(f"Gemini request failed: {last_error}")
+        )
+        trace.update({
+            "status": "failed",
+            "error": str(wrapped),
+            "latency_seconds": round(time.monotonic() - started, 3),
+        })
+        self._write_trace(trace)
+        if wrapped is last_error:
+            raise wrapped
+        raise wrapped from last_error
 
     def _get_client(self):
         if self._client is not None:

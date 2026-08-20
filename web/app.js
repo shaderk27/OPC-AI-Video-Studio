@@ -31,7 +31,7 @@ const state = {
   video: null,          // {name, path, size_mb, modified}
   subLangs: new Set(),
   audioLangs: new Set(),
-  subtitleMode: "separate",
+  subtitleMode: "both",
   formats: new Set(),
   stages: null,         // Set of active stage ids
   advanced: {},
@@ -85,7 +85,7 @@ const DEMO_CONFIG = {
   stages: DEMO_STAGES,
   defaults: {
     subtitle_languages: ["en", "zh"],
-    subtitle_mode: "separate",
+    subtitle_mode: "both",
     subtitle_formats: ["srt", "vtt"],
     audio_languages: ["zh"],
     tts_engine: "gemini",
@@ -693,7 +693,7 @@ function makeDemoResults(payload) {
     summary: { total_clips: 3, clips_passed: 3, clips_failed: 0, total_issues: 1, pass_rate: 100 },
     issues: [{ severity: "warning", message: "Clip 2: background wind noise above threshold" }],
   };
-  state.downloads = { clips: [], subtitles: [], audio: [], formatted: [], burned: [], thumbnails: [], social: [] };
+  state.downloads = { clips: [], subtitles: [], audio: [], formatted: [], burned: [], final: [], thumbnails: [], social: [] };
   state.review = state.manifest.clips.map((c, i) => ({ ...mk(i + 1, c.title, c.start, c.end, c.reason, c.hook_score) }));
 }
 
@@ -811,8 +811,8 @@ function renderReview() {
 }
 
 function renderLocalizationReview() {
-  $("#review-title").textContent = "3 · Review subtitles and voiceover";
-  $("#review-subtitle").textContent = "Edit each Gemini expert plan, then approve the clip-language outputs that should be rendered.";
+  $("#review-title").textContent = "3 · Review voiceover";
+  $("#review-subtitle").textContent = "Subtitles are already rendered automatically. Edit and approve only the Gemini voiceover plan.";
   $("#clip-review-actions").classList.add("hidden");
   $("#review-grid").classList.add("hidden");
   $("#localization-review-panel").classList.remove("hidden");
@@ -820,7 +820,7 @@ function renderLocalizationReview() {
   grid.innerHTML = "";
 
   state.localizationReview.forEach((item, itemIndex) => {
-    const subtitleCues = item.subtitle_plan?.cues || [];
+    const subtitleCues = [];
     const dubbingById = new Map((item.dubbing_plan?.cues || []).map((cue) => [cue.cue_id, cue]));
     const cueIds = [...new Set([...subtitleCues.map((c) => c.cue_id), ...dubbingById.keys()])];
     const card = el("section", "localization-card");
@@ -996,13 +996,10 @@ function renderGallery() {
   // clips
   const grid = $("#gallery-grid");
   grid.innerHTML = "";
-  // group burned outputs by source clip stem + language: filename like <stem>_burn_<lang>.mp4
-  const burnedByStem = {};
-  (state.downloads?.burned || []).forEach((b) => {
-    const m = b.filename.match(/^(.+)_burn_([a-z]+)\.mp4$/i);
-    if (!m) return;
-    const [, stem, lang] = m;
-    (burnedByStem[stem] = burnedByStem[stem] || []).push({ lang, url: b.url });
+  const finalsByClip = {};
+  (state.downloads?.final || []).forEach((artifact) => {
+    const key = Number(artifact.clip_index || 0);
+    (finalsByClip[key] = finalsByClip[key] || []).push(artifact);
   });
 
   clips.forEach((clip, ci) => {
@@ -1010,24 +1007,15 @@ function renderGallery() {
     const rev = state.review.find((r) => r.index === ci + 1) || {};
     card.innerHTML = `
       <div class="g-head"><h3>${esc(rev.title || clip.title || clip.filename)}</h3><span class="g-dur">${fmtTime(clip.duration)}</span></div>
-      <div class="g-tabs"></div>
+      <div class="g-final-meta"></div>
       <div class="g-body"><div class="g-video"></div><div class="g-content"></div></div>`;
     grid.appendChild(card);
-    const tabsEl = $(".g-tabs", card);
+    const metaEl = $(".g-final-meta", card);
     const videoBox = $(".g-video", card);
     const contentBox = $(".g-content", card);
 
-    const views = [];
     const pth = (v) => (typeof v === "string" ? v : (v && v.path) || "");
-    if (clip.path) views.push({ id: "src", label: "Source", url: "/" + clip.path.replace(/\\/g, "/").replace(/^\//, "") });
-    Object.entries(clip.platform_versions || {}).forEach(([plat, pv]) => {
-      const pp = pth(pv);
-      if (pp) views.push({ id: "f_" + plat, label: plat + (typeof pv === "object" && pv.aspect_ratio ? ` (${pv.aspect_ratio})` : ""), url: "/" + pp.replace(/\\/g, "/").replace(/^\//, "") });
-    });
-    const stem = (clip.path || clip.filename || "").split(/[\\/]/).pop().replace(/\.mp4$/, "");
-    (burnedByStem[stem] || []).forEach(({ lang, url: bUrl }) => {
-      views.push({ id: `burned_${lang}`, label: `Burned ${lang}`, url: bUrl });
-    });
+    const finalOutputs = finalsByClip[ci + 1] || clip.final_videos || [];
 
     const links = [];
     Object.entries(clip.subtitles || {}).forEach(([lang, ld]) => Object.entries(ld.formats || {}).forEach(([ext, p]) => {
@@ -1039,20 +1027,30 @@ function renderGallery() {
     });
     (clip.thumbnails || []).forEach((t, i) => { const tp = pth(t); if (tp) links.push({ label: `thumb ${i + 1}`, url: "/" + tp.replace(/\\/g, "/").replace(/^\//, "") }); });
 
-    if (!views.length) {
-      videoBox.innerHTML = `<div style="height:100%;display:flex;align-items:center;justify-content:center;color:var(--text-faint)">no preview in demo mode</div>`;
+    if (!finalOutputs.length) {
+      videoBox.innerHTML = `<div class="g-no-preview">No final delivery video was produced for this clip.</div>`;
     } else {
-      const pick = (v) => {
-        tabsEl.querySelectorAll(".g-tab").forEach((t) => t.classList.toggle("on", t.dataset.id === v.id));
-        videoBox.innerHTML = `<video src="${esc(v.url)}" controls preload="metadata"></video>`;
-      };
-      views.forEach((v) => {
-        const t = el("button", "g-tab" + (v.id === "src" ? " on" : ""), esc(v.label));
-        t.dataset.id = v.id;
-        t.addEventListener("click", () => pick(v));
-        tabsEl.appendChild(t);
-      });
-      pick(views[0]);
+      const output = finalOutputs[0];
+      const outputUrl = output.url || (output.path ? "/" + output.path.replace(/\\/g, "/").replace(/^\//, "") : "");
+      const badges = [
+        output.platform || "Original ratio",
+        output.aspect_ratio && output.aspect_ratio !== "original" ? output.aspect_ratio : "",
+        output.audio_language ? `Dub ${output.audio_language}` : "Source audio",
+        output.subtitle_language
+          ? `${output.subtitle_delivery === "burned" ? "Subtitles" : "Subtitle file"} ${output.subtitle_language}`
+          : "No subtitles",
+      ].filter(Boolean);
+      metaEl.innerHTML = badges.map((label) => `<span class="g-final-badge">${esc(label)}</span>`).join("");
+      videoBox.innerHTML = `<video src="${esc(outputUrl)}" controls preload="metadata"></video>`;
+      links.unshift({ label: "final video", url: outputUrl });
+      if (finalOutputs.length > 1) {
+        const note = el("div", "g-output-note", `${finalOutputs.length} final delivery variants were generated. The first is previewed; all are available below.`);
+        contentBox.appendChild(note);
+        finalOutputs.slice(1).forEach((item) => {
+          const itemUrl = item.url || (item.path ? "/" + item.path.replace(/\\/g, "/").replace(/^\//, "") : "");
+          links.unshift({ label: `final ${item.platform || "video"} ${item.audio_language || "source"}/${item.subtitle_language || "none"}`, url: itemUrl });
+        });
+      }
     }
 
     if (links.length) {
