@@ -30,6 +30,12 @@ class RunRequest(BaseModel):
     languages: Optional[List[str]] = Field(
         None, description="Target languages (e.g., ['en', 'zh'])"
     )
+    subtitle_languages: Optional[List[str]] = Field(
+        None, description="Subtitle languages; overrides the legacy languages field"
+    )
+    audio_languages: Optional[List[str]] = Field(
+        None, description="Dubbing languages; overrides the legacy languages field"
+    )
     max_clips: Optional[int] = Field(
         None, ge=1, le=20, description="Target clips to generate"
     )
@@ -38,6 +44,9 @@ class RunRequest(BaseModel):
     )
     review_gate_enabled: bool = Field(
         True, description="Pause after clip stage for human review"
+    )
+    localization_review_enabled: bool = Field(
+        True, description="Pause for combined Subtitle/Audio script approval"
     )
     gemini_required: bool = Field(
         True,
@@ -69,7 +78,7 @@ class RunStatus(BaseModel):
     """Full status of a pipeline run."""
     run_id: str
     video_id: str
-    status: str  # "running", "awaiting_review", "complete", "error"
+    status: str  # running, awaiting_review, awaiting_localization_review, complete, error
     current_stage: Optional[str] = None
     stages: List[StageStatus] = []
     clips_count: int = 0
@@ -156,6 +165,16 @@ class ApproveResponse(BaseModel):
     status: str = "resumed"
     approved_count: int
     message: str = "Pipeline resumed"
+
+
+class LocalizationReviewRequest(BaseModel):
+    items: List[Dict[str, Any]]
+
+
+class LocalizationReviewResponse(BaseModel):
+    run_id: str
+    status: str = "resumed"
+    approved_count: int
 
 
 # ─────────────────────────────────────────────────────────────────────────────

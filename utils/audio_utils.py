@@ -6,8 +6,11 @@ Supports Edge TTS (default; works in mainland China) and Google TTS (gTTS).
 """
 
 import asyncio
+import base64
 import os
+import subprocess
 import tempfile
+import wave
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -110,6 +113,7 @@ def text_to_speech(
     lang: str = "en",
     slow: bool = False,
     engine: str = "edge",
+    allow_gtts_fallback: bool = True,
 ) -> str:
     """
     Convert text to speech audio file (MP3).
@@ -124,6 +128,8 @@ def text_to_speech(
             return output_path
         except Exception as e:
             print(f"  [WARNING] Edge TTS failed for lang '{lang}': {e}")
+            if not allow_gtts_fallback:
+                raise
             # fall through to gTTS (may also fail if Google is blocked)
 
     tts_lang = TTS_LANG_MAP.get(lang, lang)
@@ -231,3 +237,106 @@ def get_audio_duration(audio_path: str) -> float:
     # (imageio-ffmpeg ships no ffprobe, so duration is derived from ffmpeg output)
     from utils.video_utils import get_audio_duration as _shared_duration
     return _shared_duration(audio_path)
+
+
+def gemini_text_to_speech(
+    text: str,
+    output_path: str,
+    *,
+    style: str,
+    voice: str = "Kore",
+    model: str = "gemini-3.1-flash-tts-preview",
+    client=None,
+) -> str:
+    """Generate a mono 24 kHz WAV cue with Gemini TTS."""
+    if not text.strip():
+        raise ValueError("Cannot synthesize empty dubbing text")
+    if client is None:
+        from google import genai
+        from dotenv import load_dotenv
+
+        load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
+        api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY is not set")
+        client = genai.Client(api_key=api_key)
+
+    prompt = f"{style.strip() or 'Speak naturally'}:\n{text.strip()}"
+    interaction = client.interactions.create(
+        model=model,
+        input=prompt,
+        response_format={"type": "audio"},
+        generation_config={
+            "speech_config": [{"voice": voice}],
+        },
+    )
+    audio_data = getattr(getattr(interaction, "output_audio", None), "data", None)
+    if not audio_data:
+        raise RuntimeError("Gemini TTS returned no audio data")
+    if isinstance(audio_data, str):
+        audio_data = base64.b64decode(audio_data)
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(output_path, "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(24000)
+        stream.writeframes(audio_data)
+    return output_path
+
+
+def normalize_audio_to_wav(input_path: str, output_path: str) -> str:
+    """Normalize any supported cue audio to mono 24 kHz PCM WAV."""
+    import imageio_ffmpeg
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-i", input_path,
+        "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", output_path,
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Audio normalization failed: {result.stderr[:500]}")
+    return output_path
+
+
+def build_aligned_voiceover(
+    cue_audio: List[Dict],
+    output_path: str,
+    total_duration: float,
+) -> str:
+    """Place independently synthesized cues on their approved timeline."""
+    import imageio_ffmpeg
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    if not cue_audio:
+        command = [
+            ffmpeg, "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
+            "-t", f"{total_duration:.3f}", "-c:a", "pcm_s16le", output_path,
+        ]
+    else:
+        command = [ffmpeg, "-y"]
+        filters = []
+        labels = []
+        for index, cue in enumerate(cue_audio):
+            command.extend(["-i", cue["path"]])
+            delay = max(0, int(round(float(cue["start"]) * 1000)))
+            label = f"cue{index}"
+            filters.append(
+                f"[{index}:a]aresample=24000,adelay={delay}|{delay}[{label}]"
+            )
+            labels.append(f"[{label}]")
+        filters.append(
+            f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:normalize=0,"
+            f"alimiter=limit=0.95,apad=whole_dur={total_duration:.3f}[out]"
+        )
+        command.extend([
+            "-filter_complex", ";".join(filters), "-map", "[out]",
+            "-t", f"{total_duration:.3f}", "-ac", "1", "-ar", "24000",
+            "-c:a", "pcm_s16le", output_path,
+        ])
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Voiceover alignment failed: {result.stderr[:500]}")
+    return output_path

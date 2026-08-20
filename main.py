@@ -113,7 +113,8 @@ def get_agent_role(stage: str) -> str:
 
 def run_studio(video_path: str, config: dict, skip_stages: list = None,
                override_languages: str = None, override_max_clips: int = None,
-               on_stage: callable = None, on_review: callable = None):
+               on_stage: callable = None, on_review: callable = None,
+               on_localization_review: callable = None):
     """Run the full AI Video Studio pipeline.
 
     on_stage: optional callback(stage, status, message) invoked with
@@ -121,6 +122,9 @@ def run_studio(video_path: str, config: dict, skip_stages: list = None,
               web backend (api/server.py) to stream live progress.
     on_review: optional callback(clips) invoked immediately after Clip Expert.
                It must return only the clips approved for downstream agents.
+    on_localization_review: optional callback(payload) invoked after the
+               Subtitle and Audio experts create their plans. It returns the
+               approved/edited payload before either expert renders files.
     """
 
     skip_stages = skip_stages or []
@@ -140,6 +144,9 @@ def run_studio(video_path: str, config: dict, skip_stages: list = None,
         "content_analysis", "clip", "subtitle", "audio", "thumbnail", "social_media", "format", "quality"
     ])
     active_stages = [s for s in pipeline if s not in skip_stages]
+    if "audio" in active_stages and "subtitle" not in active_stages:
+        audio_index = active_stages.index("audio")
+        active_stages.insert(audio_index, "subtitle")
 
     print_banner()
     console.print(f"\n[bold]Input:[/bold] {escape(video_path)}")
@@ -160,6 +167,41 @@ def run_studio(video_path: str, config: dict, skip_stages: list = None,
     }
 
     results = {}
+    subtitle_agent_instance = None
+    audio_agent_instance = None
+    localization_finalized = False
+
+    def finalize_localization():
+        nonlocal localization_finalized
+        if localization_finalized:
+            return
+        from utils.localization_review import (
+            apply_localization_review,
+            approve_all,
+            build_localization_review,
+        )
+
+        payload = build_localization_review(pipeline_data.get("clips", []))
+        decision = (
+            on_localization_review(payload)
+            if on_localization_review and payload.get("items")
+            else approve_all(payload)
+        )
+        pipeline_data["clips"] = apply_localization_review(
+            pipeline_data.get("clips", []), decision or {"items": []}
+        )
+        pipeline_data["localization_review"] = decision
+        pipeline_data["localization_review_applied"] = True
+
+        if subtitle_agent_instance is not None:
+            rendered = subtitle_agent_instance.render_plans(pipeline_data)
+            pipeline_data["clips"] = rendered["clips"]
+            results["subtitle"] = rendered
+        if audio_agent_instance is not None:
+            rendered = audio_agent_instance.render_plans(pipeline_data)
+            pipeline_data["clips"] = rendered["clips"]
+            results["audio"] = rendered
+        localization_finalized = True
 
     # Run each stage
     for stage in active_stages:
@@ -191,17 +233,26 @@ def run_studio(video_path: str, config: dict, skip_stages: list = None,
 
             elif stage == "subtitle":
                 from agents.subtitle_agent import SubtitleAgent
-                agent = SubtitleAgent(config)
-                result = agent.run(pipeline_data)
+                subtitle_agent_instance = SubtitleAgent(config)
+                result = subtitle_agent_instance.run({
+                    **pipeline_data,
+                    "_localization_phase": "plan",
+                })
                 pipeline_data["clips"] = result["clips"]
                 results["subtitle"] = result
+                if "audio" not in active_stages:
+                    finalize_localization()
 
             elif stage == "audio":
                 from agents.audio_agent import AudioAgent
-                agent = AudioAgent(config)
-                result = agent.run(pipeline_data)
+                audio_agent_instance = AudioAgent(config)
+                result = audio_agent_instance.run({
+                    **pipeline_data,
+                    "_localization_phase": "plan",
+                })
                 pipeline_data["clips"] = result["clips"]
                 results["audio"] = result
+                finalize_localization()
 
             elif stage == "thumbnail":
                 from agents.thumbnail_agent import ThumbnailAgent
@@ -271,8 +322,16 @@ def run_studio(video_path: str, config: dict, skip_stages: list = None,
                 .get("gemini_analysis", {})
                 .get("required", False)
             )
+            subtitle_gemini_required = bool(
+                config.get("subtitle_agent", {}).get("gemini", {}).get("required", True)
+            )
+            audio_gemini_required = bool(
+                config.get("audio_agent", {}).get("gemini", {}).get("required", True)
+            )
             if ((stage == "clip" and gemini_required) or
-                    (stage == "content_analysis" and content_gemini_required)):
+                    (stage == "content_analysis" and content_gemini_required) or
+                    (stage == "subtitle" and subtitle_gemini_required) or
+                    (stage == "audio" and audio_gemini_required)):
                 raise
             if stage in ("content_analysis", "clip", "subtitle"):  # Core stages - stop on failure
                 console.print(f"[red]Core stage '{escape(stage)}' failed. Stopping pipeline.[/red]")
@@ -364,6 +423,8 @@ def save_manifest(pipeline_data: dict, results: dict, elapsed: float, config: di
         "clip_selection_funnel": pipeline_data.get(
             "clip_selection_funnel", {}
         ),
+        "localization_review": pipeline_data.get("localization_review", {}),
+        "agent_traces_dir": config.get("paths", {}).get("agent_traces_dir", ""),
         "clips": [],
     }
 
@@ -425,6 +486,11 @@ def save_manifest(pipeline_data: dict, results: dict, elapsed: float, config: di
                     "formats": {k: v.get("path", "") for k, v in
                                lang_data.get("formats", {}).items()},
                     "segment_count": len(lang_data.get("segments", [])),
+                    "agent": lang_data.get("agent", ""),
+                    "model": lang_data.get("model", ""),
+                    "prompt_version": lang_data.get("prompt_version", ""),
+                    "approved": lang_data.get("approved", False),
+                    "trace_paths": lang_data.get("trace_paths", []),
                 }
 
         if clip.get("audio_translations"):
@@ -433,6 +499,14 @@ def save_manifest(pipeline_data: dict, results: dict, elapsed: float, config: di
                 clip_manifest["audio_translations"][lang] = {
                     "video_path": lang_data.get("video_path", ""),
                     "voiceover_path": lang_data.get("voiceover_path", ""),
+                    "tts_provider": lang_data.get("tts_provider", ""),
+                    "tts_fallback_used": lang_data.get("tts_fallback_used", False),
+                    "separation": lang_data.get("separation", {}),
+                    "agent": lang_data.get("agent", ""),
+                    "model": lang_data.get("model", ""),
+                    "prompt_version": lang_data.get("prompt_version", ""),
+                    "approved": lang_data.get("approved", False),
+                    "trace_paths": lang_data.get("trace_paths", []),
                 }
 
         if clip.get("thumbnails"):

@@ -360,6 +360,57 @@ def merge_audio_into_video(
     return output_path
 
 
+def merge_voiceover_with_background(
+    video_path: str,
+    voiceover_path: str,
+    output_path: str,
+    *,
+    background_path: str = "",
+    cue_windows: list = None,
+    background_volume: float = 0.9,
+    voiceover_volume: float = 1.0,
+    original_audio_volume: float = 0.45,
+) -> str:
+    """Mix aligned dubbing over a separated stem or speech-aware ducked original."""
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    cue_windows = cue_windows or []
+    if background_path:
+        command = [
+            FFMPEG_PATH, "-y", "-i", video_path, "-i", background_path,
+            "-i", voiceover_path,
+            "-filter_complex",
+            f"[1:a]volume={background_volume}[bg];"
+            f"[2:a]volume={voiceover_volume}[vo];"
+            "[bg][vo]amix=inputs=2:duration=first:normalize=0,"
+            "alimiter=limit=0.95[aout]",
+            "-map", "0:v", "-map", "[aout]", "-c:v", "copy",
+            "-c:a", "aac", "-shortest", output_path,
+        ]
+    else:
+        duck_filters = [f"volume={original_audio_volume}"]
+        for window in cue_windows:
+            start = max(0.0, float(window.get("start", 0)))
+            end = max(start, float(window.get("end", start)))
+            duck_filters.append(
+                f"volume=0.12:enable='between(t,{start:.3f},{end:.3f})'"
+            )
+        original_filter = ",".join(duck_filters)
+        command = [
+            FFMPEG_PATH, "-y", "-i", video_path, "-i", voiceover_path,
+            "-filter_complex",
+            f"[0:a]{original_filter}[bg];"
+            f"[1:a]volume={voiceover_volume}[vo];"
+            "[bg][vo]amix=inputs=2:duration=first:normalize=0,"
+            "alimiter=limit=0.95[aout]",
+            "-map", "0:v", "-map", "[aout]", "-c:v", "copy",
+            "-c:a", "aac", "-shortest", output_path,
+        ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Voiceover mix failed: {result.stderr[:500]}")
+    return output_path
+
+
 def resize_video(
     video_path: str,
     output_path: str,

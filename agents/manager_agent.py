@@ -49,7 +49,7 @@ DEFAULT_PIPELINE = [
 ]
 
 # Core stages — failure here stops the entire pipeline
-DEFAULT_CORE_STAGES = {"content_analysis", "clip", "subtitle"}
+DEFAULT_CORE_STAGES = {"content_analysis", "clip", "subtitle", "audio"}
 
 # WorkBuddy expert mapping (conceptual, for architecture diagram)
 WORKBUDDY_EXPERT_MAP = {
@@ -83,6 +83,7 @@ class ManagerAgent(BaseAgent):
         config: Dict[str, Any],
         progress_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
         review_gate: Optional[threading.Event] = None,
+        localization_review_gate: Optional[threading.Event] = None,
     ):
         super().__init__(
             name="Manager",
@@ -99,6 +100,9 @@ class ManagerAgent(BaseAgent):
         self.stage_timeout: int = mgr_config.get("stage_timeout", 300)
         self.review_gate_enabled: bool = mgr_config.get("review_gate_enabled", True)
         self.review_gate_timeout: int = mgr_config.get("review_gate_timeout", 300)
+        self.localization_review_enabled: bool = mgr_config.get(
+            "localization_review_enabled", True
+        )
         self.core_stages: set = set(
             mgr_config.get("core_stages", list(DEFAULT_CORE_STAGES))
         )
@@ -111,6 +115,10 @@ class ManagerAgent(BaseAgent):
         self.review_gate = review_gate or threading.Event()
         self.approved_clips: Optional[List[Dict]] = None
         self._awaiting_review = False
+        self.localization_review_gate = localization_review_gate or threading.Event()
+        self.approved_localization: Optional[Dict[str, Any]] = None
+        self._awaiting_localization_review = False
+        self._localization_agents: Dict[str, BaseAgent] = {}
 
         # Run tracking
         self.run_id: str = str(uuid.uuid4())[:8]
@@ -162,7 +170,9 @@ class ManagerAgent(BaseAgent):
 
             # Special handling: pause for review after clip stage
             if stage == "clip":
-                self._run_stage_with_retry(stage, pipeline_data, results)
+                succeeded = self._run_stage_with_retry(stage, pipeline_data, results)
+                if not succeeded:
+                    break
 
                 # Check if we should pause for human review
                 if self.review_gate_enabled and pipeline_data.get("clips"):
@@ -176,7 +186,14 @@ class ManagerAgent(BaseAgent):
                 continue
 
             # All other stages: run with retry
-            self._run_stage_with_retry(stage, pipeline_data, results)
+            succeeded = self._run_stage_with_retry(stage, pipeline_data, results)
+            if not succeeded and stage in self.core_stages:
+                break
+            active = [item for item in self.pipeline if item not in skip_stages]
+            if succeeded and stage == "subtitle" and "audio" not in active:
+                self._finalize_localization(pipeline_data, results)
+            elif succeeded and stage == "audio":
+                self._finalize_localization(pipeline_data, results)
 
         # Build final manifest
         elapsed = time.time() - start_time
@@ -232,7 +249,11 @@ class ManagerAgent(BaseAgent):
                 if agent is None:
                     raise RuntimeError(f"Unknown stage: {stage}")
 
-                result = agent.run(pipeline_data)
+                if stage in ("subtitle", "audio") and hasattr(agent, "create_plans"):
+                    result = agent.create_plans(pipeline_data)
+                    self._localization_agents[stage] = agent
+                else:
+                    result = agent.run(pipeline_data)
 
                 # Update the shared pipeline data with results
                 self._update_pipeline_data(stage, result, pipeline_data)
@@ -298,8 +319,18 @@ class ManagerAgent(BaseAgent):
                         .get("gemini_analysis", {})
                         .get("required", False)
                     )
+                    subtitle_gemini_required = bool(
+                        self.config.get("subtitle_agent", {})
+                        .get("gemini", {}).get("required", True)
+                    )
+                    audio_gemini_required = bool(
+                        self.config.get("audio_agent", {})
+                        .get("gemini", {}).get("required", True)
+                    )
                     if ((stage == "clip" and gemini_required) or
-                            (stage == "content_analysis" and content_gemini_required)):
+                            (stage == "content_analysis" and content_gemini_required) or
+                            (stage == "subtitle" and subtitle_gemini_required) or
+                            (stage == "audio" and audio_gemini_required)):
                         raise RuntimeError(error_msg) from e
 
                     # Core stages stop the pipeline
@@ -375,6 +406,8 @@ class ManagerAgent(BaseAgent):
         Emits a review_ready event, then blocks until /approve is called.
         """
         clips = pipeline_data.get("clips", [])
+        self.review_gate.clear()
+        self.approved_clips = None
         self._awaiting_review = True
 
         clip_summaries = []
@@ -412,7 +445,6 @@ class ManagerAgent(BaseAgent):
         )
 
         # Wait for approval (with timeout to prevent deadlock)
-        self.review_gate.clear()
         if self.review_gate_timeout > 0:
             approved = self.review_gate.wait(timeout=self.review_gate_timeout)
         else:
@@ -447,6 +479,71 @@ class ManagerAgent(BaseAgent):
     def is_awaiting_review(self) -> bool:
         """Check if the pipeline is paused at the review gate."""
         return self._awaiting_review
+
+    def _finalize_localization(
+        self,
+        pipeline_data: Dict[str, Any],
+        results: Dict[str, Any],
+    ) -> None:
+        """Run the combined human gate, then render both approved expert plans."""
+        from utils.localization_review import (
+            apply_localization_review,
+            approve_all,
+            build_localization_review,
+        )
+
+        payload = build_localization_review(pipeline_data.get("clips", []))
+        if self.localization_review_enabled and payload.get("items"):
+            self.localization_review_gate.clear()
+            self.approved_localization = None
+            self._awaiting_localization_review = True
+            self._emit("subtitle_plan_ready", {
+                "count": sum(bool(item.get("subtitle_plan")) for item in payload["items"]),
+            })
+            self._emit("audio_plan_ready", {
+                "count": sum(bool(item.get("dubbing_plan")) for item in payload["items"]),
+            })
+            self._emit("localization_review_ready", payload)
+            self.localization_review_gate.wait()
+            decision = self.approved_localization or {"items": []}
+            self._awaiting_localization_review = False
+        else:
+            decision = approve_all(payload)
+
+        pipeline_data["clips"] = apply_localization_review(
+            pipeline_data.get("clips", []), decision
+        )
+        pipeline_data["localization_review"] = decision
+        pipeline_data["localization_review_applied"] = True
+        self._emit("localization_review_completed", {
+            "approved": sum(
+                bool(item.get("approved")) for item in decision.get("items", [])
+            ),
+        })
+        for stage in ("subtitle", "audio"):
+            agent = self._localization_agents.get(stage)
+            if agent is None:
+                continue
+            rendered = agent.render_plans(pipeline_data)
+            self._update_pipeline_data(stage, rendered, pipeline_data)
+            results[stage] = rendered
+        for clip in pipeline_data.get("clips", []):
+            separation = clip.get("audio_separation", {})
+            if separation.get("warning"):
+                self._emit("audio_separation_warning", separation)
+            for translation in clip.get("audio_translations", {}).values():
+                if translation.get("tts_fallback_used"):
+                    self._emit("tts_fallback_used", {
+                        "clip": clip.get("filename", ""),
+                        "providers": translation.get("tts_provider_counts", {}),
+                    })
+
+    def set_approved_localization(self, payload: Dict[str, Any]) -> None:
+        self.approved_localization = payload
+        self.localization_review_gate.set()
+
+    def is_awaiting_localization_review(self) -> bool:
+        return self._awaiting_localization_review
 
     # ─────────────────────────────────────────────────────────────────────
     # Progress event emission
@@ -539,6 +636,8 @@ class ManagerAgent(BaseAgent):
             "clip_selection_funnel": pipeline_data.get(
                 "clip_selection_funnel", {}
             ),
+            "localization_review": pipeline_data.get("localization_review", {}),
+            "agent_traces_dir": config.get("paths", {}).get("agent_traces_dir", ""),
             "clips": [],
         }
 
@@ -603,6 +702,11 @@ class ManagerAgent(BaseAgent):
                             for k, v in lang_data.get("formats", {}).items()
                         },
                         "segment_count": len(lang_data.get("segments", [])),
+                        "agent": lang_data.get("agent", ""),
+                        "model": lang_data.get("model", ""),
+                        "prompt_version": lang_data.get("prompt_version", ""),
+                        "approved": lang_data.get("approved", False),
+                        "trace_paths": lang_data.get("trace_paths", []),
                     }
 
             if clip.get("audio_translations"):
@@ -611,6 +715,14 @@ class ManagerAgent(BaseAgent):
                     clip_manifest["audio_translations"][lang] = {
                         "video_path": lang_data.get("video_path", ""),
                         "voiceover_path": lang_data.get("voiceover_path", ""),
+                        "tts_provider": lang_data.get("tts_provider", ""),
+                        "tts_fallback_used": lang_data.get("tts_fallback_used", False),
+                        "separation": lang_data.get("separation", {}),
+                        "agent": lang_data.get("agent", ""),
+                        "model": lang_data.get("model", ""),
+                        "prompt_version": lang_data.get("prompt_version", ""),
+                        "approved": lang_data.get("approved", False),
+                        "trace_paths": lang_data.get("trace_paths", []),
                     }
 
             if clip.get("thumbnails"):

@@ -17,7 +17,7 @@ The single source of truth for every option the UI renders. Return values **from
 ```json
 {
   "project": "OPC AI Video Studio",
-  "languages": [ {"code": "en", "name": "English"}, {"code": "zh", "name": "Chinese"}, "...20+" ],
+  "languages": [ {"code": "en", "name": "English", "subtitle_supported": true, "gemini_tts_supported": true, "edge_tts_fallback_supported": true}, "..." ],
   "formats": [
     {"platform": "TikTok", "width": 1080, "height": 1920, "aspect_ratio": "9:16"},
     {"platform": "YouTube Shorts", "width": 1080, "height": 1920, "aspect_ratio": "9:16"},
@@ -27,7 +27,7 @@ The single source of truth for every option the UI renders. Return values **from
   ],
   "whisper_models": ["tiny", "base", "small", "medium", "large-v3"],
   "detection_strategies": ["combined", "transcript", "audio_energy", "silence"],
-  "tts_engines": ["edge", "gtts"],
+  "tts_engines": ["gemini"],
   "tones": ["energetic", "casual", "professional", "educational"],
   "stages": [
     {"id": "content_analysis", "name": "Content Analyzer", "role": "Video Content Intelligence Analyst"},
@@ -44,7 +44,7 @@ The single source of truth for every option the UI renders. Return values **from
     "subtitle_mode": "separate",          // "separate" | "burn" | "both"
     "subtitle_formats": ["srt", "vtt"],
     "audio_languages": ["zh"],
-    "tts_engine": "edge",
+    "localization_review_enabled": true,
     "formats": ["TikTok", "YouTube Shorts", "Instagram Reels", "YouTube", "Instagram Feed"],
     "stages": ["content_analysis", "clip", "subtitle", "audio", "thumbnail", "social_media", "format", "quality"],
     "whisper_model": "small",
@@ -86,11 +86,12 @@ Body (all fields optional; omitted → `defaults` from config):
 ```json
 {
   "video": "input/Kayaking.mp4",
+  "languages": null,                       // legacy alias used only when separate lists are absent
   "subtitle_languages": ["en", "zh"],
   "subtitle_mode": "separate",          // "separate" | "burn" | "both"
   "subtitle_formats": ["srt", "vtt"],
   "audio_languages": ["zh"],
-  "tts_engine": "edge",
+  "localization_review_enabled": true,
   "formats": ["TikTok", "YouTube Shorts", "Instagram Reels"],
   "stages": ["content_analysis", "clip", "subtitle", "audio", "thumbnail", "social_media", "format", "quality"],
   "whisper_model": "small",
@@ -127,6 +128,12 @@ Response: `{ "run_id": "20260818-1455-abc123" }` (server starts the pipeline in 
 | `stage_failed` | `{stage, ok: false, error}` |
 | `review_ready` | `{count}` (pipeline pauses immediately after Clip Expert) |
 | `review_completed` | `{approved, rejected}` (downstream processing resumes) |
+| `subtitle_plan_ready` | `{count}` |
+| `audio_plan_ready` | `{count}` |
+| `localization_review_ready` | `{count}` (pipeline pauses before rendering) |
+| `localization_review_completed` | `{approved}` |
+| `tts_fallback_used` | `{clip, language, provider}` |
+| `audio_separation_warning` | `{clip, warning}` |
 | `run_completed` | `{run_id, elapsed, manifest, clips, quality}` |
 | `run_failed` | `{run_id, error}` |
 | `ping` | `{}` every 15 s (keep-alive) |
@@ -142,7 +149,7 @@ status snapshot's `error` field.
 ## 6. `GET /api/runs/{run_id}` — status snapshot (poll fallback)
 
 ```json
-{ "run_id": "...", "status": "running|awaiting_review|completed|failed", "elapsed": 42.0,
+{ "run_id": "...", "status": "running|awaiting_review|awaiting_localization_review|completed|failed", "elapsed": 42.0,
   "error": "",
   "stages": [ {"stage": "clip", "status": "active|done|failed|pending", "elapsed": 3.2} ],
   "clips_count": 5 }
@@ -167,7 +174,20 @@ thumbnail, social-media, format, and quality agents do not run until this
 endpoint is called. An empty list ends the run without downstream processing.
 The final decisions are saved as `review_decisions.json` in that run's folder.
 
-## 8. Results
+## 8. Localization review gate
+
+- `GET /api/runs/{run_id}/localization-review` returns every approved
+  clip/language pair with its editable `subtitle_plan`, editable `dubbing_plan`,
+  immutable cue IDs/times, warnings, and approval flag.
+- `POST /api/runs/{run_id}/localization-review` accepts `{"items": [...]}` or
+  `{"approve_all": true}`. Every expected clip/language key must occur exactly
+  once. Submitted text edits are persisted to
+  `localization_review_decisions.json` before rendering resumes.
+
+Gemini creates both plans before this combined gate. Subtitle and Audio agents
+then render only approved plans; Whisper remains authoritative for timing.
+
+## 9. Results
 
 - `GET /api/runs/{run_id}/manifest` → that run's `manifest.json` content
 - `GET /api/runs/{run_id}/quality` → that run's `quality_report.json` content

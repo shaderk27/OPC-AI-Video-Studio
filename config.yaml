@@ -138,7 +138,15 @@ subtitle_agent:
   # small = better accuracy          (~2GB RAM)
   # medium = high accuracy           (~5GB RAM)
   # large-v3 = best accuracy         (~10GB RAM)
-  whisper_model: "small"
+  # Use the complete local base model for deterministic offline demos. Switch
+  # to small only after scripts/setup_whisper_model.py completes successfully.
+  whisper_model: "base"
+  gemini:
+    enabled: true
+    required: true
+    model: "gemini-3.5-flash-lite"
+    prompt_version: "subtitle-v1"
+    timeout_seconds: 60
   # Accuracy controls shared by Content Analyzer, Clip Expert and subtitles.
   beam_size: 5
   vad_filter: true
@@ -167,25 +175,37 @@ subtitle_agent:
   max_chars_per_line: 42
   # Maximum duration per subtitle (seconds)
   max_subtitle_duration: 7.0
+  max_reading_chars_per_second: 24.0
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Audio Expert Agent Settings
 # Translates audio into target languages using TTS
 # ─────────────────────────────────────────────────────────────────────────────
 audio_agent:
-  # TTS engine: "edge" (Microsoft Edge TTS — free, no key, works in mainland China)
-  #             "gtts" (Google TTS — blocked on many CN networks)
-  tts_engine: "edge"
+  gemini:
+    enabled: true
+    required: true
+    model: "gemini-3.5-flash-lite"
+    prompt_version: "audio-v1"
+    timeout_seconds: 60
   # Target languages for audio translation (ISO 639-1 codes)
   target_languages:
     - "en"
     - "zh"
-  # Volume of original audio when mixing (0.0 = muted, 1.0 = full)
-  original_audio_volume: 0.15
-  # Volume of translated voiceover
+  tts:
+    model: "gemini-3.1-flash-tts-preview"
+    voice: "Kore"
+    edge_fallback: true
+  separation:
+    enabled: true
+    executable: "models/audio-separator/.venv/Scripts/audio-separator.exe"
+    model: "UVR_MDXNET_KARA_2.onnx"
+    model_dir: "models/audio-separator"
+  background_volume: 0.9
+  # Used only by the clearly recorded speech-aware-ducking fallback.
+  original_audio_volume: 0.45
   voiceover_volume: 1.0
-  # Speed adjustment for TTS (1.0 = normal, 0.9 = slower, 1.1 = faster)
-  tts_speed: 1.0
+  max_tts_speed: 1.2
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Enhancement: Thumbnail Agent
@@ -307,6 +327,7 @@ manager_agent:
   stage_timeout: 300
   # Pause after Clip stage for human review of generated clips
   review_gate_enabled: true
+  localization_review_enabled: true
   # Seconds before auto-approval. 0 means wait for an explicit human decision.
   review_gate_timeout: 0
   # Core stages — failure here stops the entire pipeline
@@ -314,3 +335,4 @@ manager_agent:
     - "content_analysis"
     - "clip"
     - "subtitle"
+    - "audio"

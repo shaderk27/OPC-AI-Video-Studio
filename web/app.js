@@ -39,6 +39,8 @@ const state = {
   run: { status: "idle", stages: {}, elapsed: 0, video: "" },
   review: [],
   reviewActive: false,
+  localizationReview: [],
+  localizationActive: false,
   manifest: null,
   quality: null,
   downloads: null,
@@ -78,7 +80,7 @@ const DEMO_CONFIG = {
   ],
   whisper_models: ["tiny", "base", "small", "medium", "large-v3"],
   detection_strategies: ["combined", "transcript", "audio_energy", "silence"],
-  tts_engines: ["edge", "gtts"],
+  tts_engines: ["gemini"],
   tones: ["energetic", "casual", "professional", "educational"],
   stages: DEMO_STAGES,
   defaults: {
@@ -86,7 +88,7 @@ const DEMO_CONFIG = {
     subtitle_mode: "separate",
     subtitle_formats: ["srt", "vtt"],
     audio_languages: ["zh"],
-    tts_engine: "edge",
+    tts_engine: "gemini",
     formats: ["TikTok", "YouTube Shorts", "Instagram Reels", "YouTube", "Instagram Feed"],
     stages: DEMO_STAGES.map((s) => s.id),
     whisper_model: "small",
@@ -420,6 +422,7 @@ function buildPayload() {
     original_audio_volume: parseFloat($("#adv-orig-vol").value) ?? d.original_audio_volume,
     voiceover_volume: parseFloat($("#adv-vo-vol").value) ?? d.voiceover_volume,
     tts_speed: parseFloat($("#adv-tts-speed").value) ?? d.tts_speed,
+    localization_review_enabled: d.localization_review_enabled !== false,
     thumbnail_enabled: $("#adv-thumb").checked,
     social_tone: state.advanced.social_tone || d.social_tone,
     quality_checks: {
@@ -468,6 +471,8 @@ function resetRunState() {
   state.run = { status: "running", stages: {}, elapsed: 0, video: "" };
   state.review = [];
   state.reviewActive = false;
+  state.localizationReview = [];
+  state.localizationActive = false;
   state.manifest = state.quality = state.downloads = null;
   state.runStartTs = Date.now();
   $("#stage-rail").innerHTML = "";
@@ -514,7 +519,12 @@ function setStage(id, status, extra = "") {
 /* ───────────────────────── SSE + polling ───────────────────────── */
 function connectSSE(runId) {
   const es = new EventSource(`/api/runs/${runId}/events`);
-  const names = ["run_started", "stage_started", "stage_log", "stage_completed", "stage_failed", "review_ready", "review_completed", "run_completed", "run_failed", "ping"];
+  const names = [
+    "run_started", "stage_started", "stage_log", "stage_completed", "stage_failed",
+    "review_ready", "review_completed", "subtitle_plan_ready", "audio_plan_ready",
+    "localization_review_ready", "localization_review_completed", "tts_fallback_used",
+    "audio_separation_warning", "run_completed", "run_failed", "ping",
+  ];
   names.forEach((n) => es.addEventListener(n, (ev) => {
     let d = {};
     try { d = JSON.parse(ev.data); } catch (e) {}
@@ -531,6 +541,7 @@ function startPolling(runId) {
       if (snap.status === "completed") { clearInterval(state.pollTimer); handleRunCompleted(); }
       else if (snap.status === "failed") { clearInterval(state.pollTimer); handleRunFailed(snap.error || "pipeline failed (see log)"); }
       else if (snap.status === "awaiting_review" && !state.reviewActive) { handleReviewReady(); }
+      else if (snap.status === "awaiting_localization_review" && !state.localizationActive) { handleLocalizationReviewReady(); }
       else {
         Object.entries(snap.stages || {}).forEach(([id, st]) => {
           if (st.status !== "pending") setStage(id, st.status);
@@ -570,6 +581,27 @@ function logRun(event, d) {
       log(`Review complete — ${d.approved || 0} approved, ${d.rejected || 0} dropped.`, "ok");
       state.reviewActive = false;
       showView("progress");
+      break;
+    case "subtitle_plan_ready":
+      log(`${d.count || 0} subtitle plans ready.`, "ok", "subtitle");
+      break;
+    case "audio_plan_ready":
+      log(`${d.count || 0} dubbing plans ready.`, "ok", "audio");
+      break;
+    case "localization_review_ready":
+      log(`${d.count || 0} localization plans ready — waiting for approval.`, "info");
+      handleLocalizationReviewReady();
+      break;
+    case "localization_review_completed":
+      log(`Localization review complete — ${d.approved || 0} language outputs approved.`, "ok");
+      state.localizationActive = false;
+      showView("progress");
+      break;
+    case "tts_fallback_used":
+      log(`Gemini TTS fallback used${d.language ? ` for ${d.language}` : ""}.`, "warn", "audio");
+      break;
+    case "audio_separation_warning":
+      log(d.warning || "Speech separation unavailable; using speech-aware ducking.", "warn", "audio");
       break;
     case "run_completed":
       log(`Run completed in ${fmtTime(d.elapsed)} — ${d.clips || 0} clips.`, "ok");
@@ -700,6 +732,21 @@ async function handleReviewReady() {
   }
 }
 
+async function handleLocalizationReviewReady() {
+  if (state.localizationActive) return;
+  state.localizationActive = true;
+  enableStep("review", true);
+  try {
+    const payload = await api(`/api/runs/${state.runId}/localization-review`);
+    state.localizationReview = payload.items || [];
+    renderLocalizationReview();
+    showView("review");
+  } catch (e) {
+    state.localizationActive = false;
+    log("Could not load localization plans: " + e.message, "err");
+  }
+}
+
 async function loadReviewDemo() {
   state.review = (state.manifest?.clips || []).map((c, i) => ({
     index: i + 1, filename: c.filename, url: "", duration: c.duration, start: c.start, end: c.end,
@@ -719,6 +766,11 @@ function handleRunFailed(msg) {
 
 /* ───────────────────────── review screen ───────────────────────── */
 function renderReview() {
+  $("#review-title").textContent = "3 · Approve clips before processing";
+  $("#review-subtitle").textContent = "Only approved clips continue to subtitles, voiceover, thumbnails, captions, and formatting.";
+  $("#clip-review-actions").classList.remove("hidden");
+  $("#review-grid").classList.remove("hidden");
+  $("#localization-review-panel").classList.add("hidden");
   const grid = $("#review-grid");
   grid.innerHTML = "";
   const preview = (clip) => clip.url
@@ -757,6 +809,79 @@ function renderReview() {
   $("#review-next").disabled = anyPending;
   $("#review-next").textContent = anyPending ? "Review every clip to continue" : "Continue processing →";
 }
+
+function renderLocalizationReview() {
+  $("#review-title").textContent = "3 · Review subtitles and voiceover";
+  $("#review-subtitle").textContent = "Edit each Gemini expert plan, then approve the clip-language outputs that should be rendered.";
+  $("#clip-review-actions").classList.add("hidden");
+  $("#review-grid").classList.add("hidden");
+  $("#localization-review-panel").classList.remove("hidden");
+  const grid = $("#localization-review-grid");
+  grid.innerHTML = "";
+
+  state.localizationReview.forEach((item, itemIndex) => {
+    const subtitleCues = item.subtitle_plan?.cues || [];
+    const dubbingById = new Map((item.dubbing_plan?.cues || []).map((cue) => [cue.cue_id, cue]));
+    const cueIds = [...new Set([...subtitleCues.map((c) => c.cue_id), ...dubbingById.keys()])];
+    const card = el("section", "localization-card");
+    card.innerHTML = `
+      <div class="localization-card-head">
+        <div><strong>Clip ${esc(item.clip_index)} · ${esc(item.language)}</strong><div class="muted">${esc(item.clip_id)}</div></div>
+        <label class="localization-approval"><input type="checkbox" ${item.approved ? "checked" : ""}> Approve language</label>
+      </div>
+      <div class="localization-cues"></div>
+      ${(item.warnings || []).length ? `<div class="localization-warning">⚠ ${esc(item.warnings.join(" · "))}</div>` : ""}`;
+    const approval = card.querySelector(".localization-approval input");
+    approval.addEventListener("change", () => { item.approved = approval.checked; });
+    const cues = card.querySelector(".localization-cues");
+
+    cueIds.forEach((cueId) => {
+      const subtitle = subtitleCues.find((cue) => cue.cue_id === cueId);
+      const dubbing = dubbingById.get(cueId);
+      const start = subtitle?.start ?? dubbing?.start ?? 0;
+      const end = subtitle?.end ?? dubbing?.end ?? 0;
+      const source = subtitle?.source_text || dubbing?.source_text || "";
+      const row = el("div", "localization-cue");
+      row.innerHTML = `
+        <div class="localization-cue-meta"><code>${esc(cueId)}</code><span>${fmtTime(start)} → ${fmtTime(end)}</span></div>
+        <div class="localization-source">${esc(source)}</div>
+        ${subtitle ? `<label>Subtitle<textarea data-field="subtitle">${esc(subtitle.line_break_text || subtitle.translated_text || "")}</textarea></label>` : ""}
+        ${dubbing ? `<label>Spoken voiceover<textarea data-field="dubbing">${esc(dubbing.spoken_text || "")}</textarea></label>` : ""}`;
+      const subtitleInput = row.querySelector('[data-field="subtitle"]');
+      if (subtitleInput) subtitleInput.addEventListener("input", () => {
+        subtitle.line_break_text = subtitleInput.value;
+        subtitle.translated_text = subtitleInput.value.replace(/\n/g, " ").trim();
+      });
+      const dubbingInput = row.querySelector('[data-field="dubbing"]');
+      if (dubbingInput) dubbingInput.addEventListener("input", () => { dubbing.spoken_text = dubbingInput.value; });
+      cues.appendChild(row);
+    });
+    grid.appendChild(card);
+  });
+}
+
+$("#localization-approve-all").addEventListener("click", () => {
+  state.localizationReview.forEach((item) => { item.approved = true; });
+  renderLocalizationReview();
+});
+
+$("#localization-next").addEventListener("click", async () => {
+  const button = $("#localization-next");
+  button.disabled = true;
+  try {
+    await api(`/api/runs/${state.runId}/localization-review`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items: state.localizationReview }),
+    });
+    state.localizationActive = false;
+    showView("progress");
+  } catch (e) {
+    log("Could not continue after localization review: " + e.message, "err");
+  } finally {
+    button.disabled = false;
+  }
+});
 
 async function setDecision(index, decision) {
   const clip = state.review.find((c) => c.index === index);

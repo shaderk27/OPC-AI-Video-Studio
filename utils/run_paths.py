@@ -16,6 +16,7 @@ RUN_SUBDIRECTORIES = {
     "social_dir": "social",
     "formatted_dir": "formatted",
     "burned_dir": "burned",
+    "agent_traces_dir": "agent_traces",
 }
 
 
