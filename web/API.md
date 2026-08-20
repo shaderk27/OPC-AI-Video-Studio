@@ -52,7 +52,7 @@ The single source of truth for every option the UI renders. Return values **from
     "min_clip_duration": 15,
     "max_clip_duration": 60,
     "detection_strategy": "combined",
-    "gemini_required": false,
+    "gemini_required": true,
     "padding_before": 1.5,
     "padding_after": 1.0,
     "snap_to_silence": true,
@@ -98,7 +98,7 @@ Body (all fields optional; omitted → `defaults` from config):
   "min_clip_duration": 15,
   "max_clip_duration": 60,
   "detection_strategy": "combined",
-  "gemini_required": false,
+  "gemini_required": true,
   "padding_before": 1.5,
   "padding_after": 1.0,
   "snap_to_silence": true,
@@ -132,7 +132,7 @@ Response: `{ "run_id": "20260818-1455-abc123" }` (server starts the pipeline in 
 | `ping` | `{}` every 15 s (keep-alive) |
 
 Frontend falls back to polling `GET /api/runs/{run_id}` every 2 s if SSE fails.
-When `gemini_required` is true, the run fails if the Gemini key/SDK is missing,
+`gemini_required` defaults to `true`. The run fails if the Gemini key/SDK is missing,
 a candidate proxy cannot be created or uploaded, the API cannot be reached,
 the request times out, a transcript/video response is invalid, or every visual
 candidate is rejected. The reason is delivered through `run_failed` and the

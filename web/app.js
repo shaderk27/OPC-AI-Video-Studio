@@ -93,7 +93,7 @@ const DEMO_CONFIG = {
     max_clips: 5, min_clip_duration: 15, max_clip_duration: 60,
     detection_strategy: "combined",
     padding_before: 1.5, padding_after: 1.0, snap_to_silence: true,
-    gemini_required: false,
+    gemini_required: true,
     source_language: null,
     original_audio_volume: 0.15, voiceover_volume: 1.0, tts_speed: 1.0,
     thumbnail_enabled: true,

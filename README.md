@@ -181,7 +181,7 @@ review. Configure or disable it in `config.yaml`:
 clip_agent:
   gemini_review:
     enabled: true
-    required: false
+    required: true
     model: "gemini-3.5-flash-lite"
     candidate_limit: 12
     blend_weight: 0.5
@@ -192,9 +192,10 @@ clip_agent:
     video_blend_weight: 0.8
 ```
 
-In the web control panel, enable **Require Gemini API** under Advanced options
-to make transcript and visual review mandatory. Missing credentials, SDK
-errors, proxy/upload problems, timeouts, invalid output, or rejection of every
+**Require Gemini API** is enabled by default in the web control panel, so
+transcript and visual review are mandatory unless you deliberately turn it off
+for a run. Missing credentials, SDK errors, proxy/upload problems, timeouts,
+invalid output, or rejection of every
 candidate then fail the Clip stage and display the reason. Leave it off to
 retain heuristic fallback.
 
@@ -218,7 +219,7 @@ networks. The studio handles this automatically:
 | huggingface.co | Whisper model download | Blocked | Auto-routes through **hf-mirror.com**, caches under `models/whisper/` |
 | translate.google.com | Subtitle translation | Blocked | Falls back to **MyMemory** (mymemory.translated.net) |
 | gTTS (Google) | Text-to-speech | Blocked | Uses **Edge TTS** by default (`tts_engine: "edge"`) |
-| Gemini API | Optional clip editorial review | May be unavailable | Keeps the local heuristic ranking; set `gemini_review.enabled: false` to disable calls |
+| Gemini API | Transcript + visual clip review, required by default | May be unavailable | The run fails visibly; turn off **Require Gemini API** for a deliberate local fallback |
 
 - **Pre-download the Whisper model** (optional but recommended on first run):
 

@@ -175,7 +175,7 @@ def _defaults(cfg: dict) -> dict:
         "padding_before": clp.get("padding_before", 1.5),
         "padding_after": clp.get("padding_after", 1.0),
         "snap_to_silence": clp.get("snap_to_silence", True),
-        "gemini_required": gemini.get("required", False),
+        "gemini_required": gemini.get("required", True),
         "source_language": sub.get("source_language"),
         "original_audio_volume": aud.get("original_audio_volume", 0.15),
         "voiceover_volume": aud.get("voiceover_volume", 1.0),

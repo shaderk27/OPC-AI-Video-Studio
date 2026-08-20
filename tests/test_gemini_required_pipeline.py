@@ -7,12 +7,18 @@ from fastapi import HTTPException
 
 import main
 from api import webapp
+from api.models import RunRequest
 from api.webapp import WebRunRequest
 from agents.manager_agent import ManagerAgent
 from utils.gemini_clip_reviewer import GeminiRequiredError
 
 
 class GeminiRequiredPipelineTests(unittest.TestCase):
+    def test_api_requests_require_gemini_by_default(self):
+        request = RunRequest(video_id="uploaded-video")
+
+        self.assertTrue(request.gemini_required)
+
     def test_web_override_enables_and_requires_gemini(self):
         config = {
             "clip_agent": {"gemini_review": {"enabled": False, "required": False}},

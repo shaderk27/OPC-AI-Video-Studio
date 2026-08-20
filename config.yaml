@@ -94,7 +94,7 @@ clip_agent:
     enabled: true
     # When true, any missing key, SDK problem, timeout, API error, or invalid
     # response fails the Clip stage and the entire run instead of falling back.
-    required: false
+    required: true
     model: "gemini-3.5-flash-lite"
     candidate_limit: 12
     blend_weight: 0.5

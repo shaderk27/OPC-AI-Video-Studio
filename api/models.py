@@ -40,7 +40,7 @@ class RunRequest(BaseModel):
         True, description="Pause after clip stage for human review"
     )
     gemini_required: bool = Field(
-        False,
+        True,
         description="Fail the run if Gemini transcript or visual clip review cannot be completed",
     )
 
