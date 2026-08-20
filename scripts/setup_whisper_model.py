@@ -30,13 +30,13 @@ def main() -> None:
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
-    model_size = cfg.get("subtitle_agent", {}).get("whisper_model", "base")
+    model_size = cfg.get("subtitle_agent", {}).get("whisper_model", "small")
 
     print(f"Endpoint : {_resolve_hf_endpoint()}")
     print(f"Model    : faster-whisper '{model_size}' (CPU, int8)")
     print(f"Save to  : {WHISPER_MODELS_DIR}")
     print("Downloading... (this can take a few minutes the first time)")
-    _load_whisper_model(model_size)
+    _load_whisper_model(model_size, allow_fallback=False)
     print("Done. The model is cached locally; the pipeline will use it offline.")
 
 

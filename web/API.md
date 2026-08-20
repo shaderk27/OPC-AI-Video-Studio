@@ -132,10 +132,11 @@ Response: `{ "run_id": "20260818-1455-abc123" }` (server starts the pipeline in 
 | `ping` | `{}` every 15 s (keep-alive) |
 
 Frontend falls back to polling `GET /api/runs/{run_id}` every 2 s if SSE fails.
-`gemini_required` defaults to `true`. The run fails if the Gemini key/SDK is missing,
+`gemini_required` defaults to `true`. It requires both Content Analyzer and Clip
+Expert. The run fails if the Gemini key/SDK is missing, transcript analysis fails,
 a candidate proxy cannot be created or uploaded, the API cannot be reached,
-the request times out, a transcript/video response is invalid, or every visual
-candidate is rejected. The reason is delivered through `run_failed` and the
+the request times out, a response is invalid, or every visual candidate is
+rejected. The reason is delivered through `run_failed` and the
 status snapshot's `error` field.
 
 ## 6. `GET /api/runs/{run_id}` — status snapshot (poll fallback)

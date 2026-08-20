@@ -41,6 +41,16 @@ content_analyzer:
   summary_sentences: 3
   # Save the full analysis report as content_analysis.json
   save_report: true
+  # Gemini analyzes timestamped transcript text only; the full video is not
+  # uploaded. Its semantic output replaces shallow topics/chapters/key moments.
+  gemini_analysis:
+    enabled: true
+    required: true
+    model: "gemini-3.5-flash-lite"
+    timeout_seconds: 120
+    chunk_max_chars: 50000
+    max_topics: 8
+    max_key_moments: 12
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Clip Expert Agent Settings
@@ -123,7 +133,16 @@ subtitle_agent:
   # small = better accuracy          (~2GB RAM)
   # medium = high accuracy           (~5GB RAM)
   # large-v3 = best accuracy         (~10GB RAM)
-  whisper_model: "base"
+  whisper_model: "small"
+  # Accuracy controls shared by Content Analyzer, Clip Expert and subtitles.
+  beam_size: 5
+  vad_filter: true
+  vad_min_silence_ms: 300
+  # Names, teams, places or specialist terms Whisper should expect.
+  # Example: ["Lionel Messi", "Ángel Di María", "Argentina", "France"]
+  vocabulary_hints: []
+  # If this model cannot be downloaded, a complete locally cached base model is
+  # used automatically so the pipeline can continue.
   # Model downloads: huggingface.co is unreachable from mainland China, so the
   # studio automatically downloads via hf-mirror.com and caches the model under
   # models/whisper/. To override, set the HF_ENDPOINT environment variable,

@@ -70,7 +70,16 @@ class ClipAgent(BaseAgent):
             "topic_relevance_threshold", 60.0
         )
         self.snap_to_silence = self.clip_config.get("snap_to_silence", True)
-        self.whisper_model = config.get("subtitle_agent", {}).get("whisper_model", "base")
+        subtitle_config = config.get("subtitle_agent", {})
+        self.whisper_model = subtitle_config.get("whisper_model", "small")
+        self.whisper_beam_size = subtitle_config.get("beam_size", 5)
+        self.whisper_vad_filter = subtitle_config.get("vad_filter", True)
+        self.whisper_vad_min_silence_ms = subtitle_config.get(
+            "vad_min_silence_ms", 300
+        )
+        self.whisper_vocabulary_hints = subtitle_config.get(
+            "vocabulary_hints", []
+        )
         gemini_config = self.clip_config.get("gemini_review", {})
         self.gemini_review_required = bool(gemini_config.get("required", False))
         self.gemini_review_weight = min(
@@ -312,7 +321,15 @@ class ClipAgent(BaseAgent):
 
             # Transcribe
             source_lang = config_get(self.config, "subtitle_agent.source_language")
-            segments = transcribe_audio(temp_audio, self.whisper_model, language=source_lang)
+            segments = transcribe_audio(
+                temp_audio,
+                self.whisper_model,
+                language=source_lang,
+                beam_size=self.whisper_beam_size,
+                vad_filter=self.whisper_vad_filter,
+                vad_min_silence_ms=self.whisper_vad_min_silence_ms,
+                vocabulary_hints=self.whisper_vocabulary_hints,
+            )
 
             # Clean up temp audio
             try:
@@ -500,7 +517,9 @@ class ClipAgent(BaseAgent):
                 reason_parts.append("emotional intensity")
             if km.get("keyword_hits", 0) > 0:
                 reason_parts.append(f"{km['keyword_hits']} keyword hits")
-            reason = "; ".join(reason_parts) if reason_parts else "key moment"
+            reason = km.get("reason") or (
+                "; ".join(reason_parts) if reason_parts else "key moment"
+            )
 
             highlights.append({
                 "start": start,
@@ -508,7 +527,9 @@ class ClipAgent(BaseAgent):
                 "score": score,
                 "reason": reason,
                 "text_preview": km.get("text_preview", ""),
-                "title": self._generate_title(km.get("text", "")),
+                "title": km.get("title") or self._generate_title(
+                    km.get("text", "")
+                ),
                 "source": "content_key_moment",
                 "sentiment_intensity": km.get("sentiment_score", 0),
             })

@@ -172,15 +172,26 @@ async def run_pipeline(request: RunRequest):
 
     gemini_review = config.setdefault("clip_agent", {}).setdefault("gemini_review", {})
     gemini_review["required"] = request.gemini_required
+    content_gemini = config.setdefault("content_analyzer", {}).setdefault(
+        "gemini_analysis", {}
+    )
+    content_gemini["required"] = request.gemini_required
     if request.gemini_required:
-        if request.skip_stages and "clip" in request.skip_stages:
+        if request.skip_stages and any(
+            stage in request.skip_stages for stage in ("content_analysis", "clip")
+        ):
             raise HTTPException(
                 status_code=400,
-                detail="Require Gemini API also requires the Clip Expert stage.",
+                detail="Require Gemini API also requires Content Analyzer and Clip Expert.",
             )
         gemini_review["enabled"] = True
+        content_gemini["enabled"] = True
         from utils.gemini_clip_reviewer import GeminiClipReviewer
-        setup_error = GeminiClipReviewer(config).configuration_error()
+        from utils.gemini_content_analyzer import GeminiContentAnalyzer
+        setup_error = (
+            GeminiClipReviewer(config).configuration_error() or
+            GeminiContentAnalyzer(config).configuration_error()
+        )
         if setup_error:
             raise HTTPException(
                 status_code=400,

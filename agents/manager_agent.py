@@ -293,7 +293,13 @@ class ManagerAgent(BaseAgent):
                         .get("gemini_review", {})
                         .get("required", False)
                     )
-                    if stage == "clip" and gemini_required:
+                    content_gemini_required = bool(
+                        self.config.get("content_analyzer", {})
+                        .get("gemini_analysis", {})
+                        .get("required", False)
+                    )
+                    if ((stage == "clip" and gemini_required) or
+                            (stage == "content_analysis" and content_gemini_required)):
                         raise RuntimeError(error_msg) from e
 
                     # Core stages stop the pipeline
@@ -525,7 +531,7 @@ class ManagerAgent(BaseAgent):
                 ),
                 "max_clips": config.get("clip_agent", {}).get("max_clips", 5),
                 "whisper_model": config.get("subtitle_agent", {}).get(
-                    "whisper_model", "base"
+                    "whisper_model", "small"
                 ),
             },
             "content_analysis": {},
@@ -544,6 +550,12 @@ class ManagerAgent(BaseAgent):
                 "key_moments": len(ca.get("key_moments", [])),
                 "summary": ca.get("summary", ""),
                 "overall_sentiment": ca.get("sentiment", {}).get("overall", ""),
+                "content_type": ca.get("content_type", "unknown"),
+                "entities": ca.get("entities", []),
+                "corrected_terms": ca.get("corrected_terms", []),
+                "gemini_analyzed": ca.get("gemini_analyzed", False),
+                "gemini_model": ca.get("gemini_model"),
+                "gemini_chunks_analyzed": ca.get("gemini_chunks_analyzed", 0),
             }
 
         # Per-clip details

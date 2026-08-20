@@ -44,7 +44,15 @@ class SubtitleAgent(BaseAgent):
         )
         self.sub_config = config.get("subtitle_agent", {})
         self.paths = config.get("paths", {})
-        self.whisper_model = self.sub_config.get("whisper_model", "base")
+        self.whisper_model = self.sub_config.get("whisper_model", "small")
+        self.whisper_beam_size = self.sub_config.get("beam_size", 5)
+        self.whisper_vad_filter = self.sub_config.get("vad_filter", True)
+        self.whisper_vad_min_silence_ms = self.sub_config.get(
+            "vad_min_silence_ms", 300
+        )
+        self.whisper_vocabulary_hints = self.sub_config.get(
+            "vocabulary_hints", []
+        )
         self.source_language = self.sub_config.get("source_language")
         self.target_languages = self.sub_config.get("target_languages", ["en"])
         self.formats = self.sub_config.get("formats", ["srt", "vtt"])
@@ -79,6 +87,10 @@ class SubtitleAgent(BaseAgent):
                 temp_audio,
                 model_size=self.whisper_model,
                 language=self.source_language,
+                beam_size=self.whisper_beam_size,
+                vad_filter=self.whisper_vad_filter,
+                vad_min_silence_ms=self.whisper_vad_min_silence_ms,
+                vocabulary_hints=self.whisper_vocabulary_hints,
             )
 
             # Clean up temp audio

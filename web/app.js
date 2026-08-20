@@ -89,7 +89,7 @@ const DEMO_CONFIG = {
     tts_engine: "edge",
     formats: ["TikTok", "YouTube Shorts", "Instagram Reels", "YouTube", "Instagram Feed"],
     stages: DEMO_STAGES.map((s) => s.id),
-    whisper_model: "base",
+    whisper_model: "small",
     max_clips: 5, min_clip_duration: 15, max_clip_duration: 60,
     detection_strategy: "combined",
     padding_before: 1.5, padding_after: 1.0, snap_to_silence: true,

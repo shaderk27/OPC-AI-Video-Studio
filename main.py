@@ -266,7 +266,13 @@ def run_studio(video_path: str, config: dict, skip_stages: list = None,
                 .get("gemini_review", {})
                 .get("required", False)
             )
-            if stage == "clip" and gemini_required:
+            content_gemini_required = bool(
+                config.get("content_analyzer", {})
+                .get("gemini_analysis", {})
+                .get("required", False)
+            )
+            if ((stage == "clip" and gemini_required) or
+                    (stage == "content_analysis" and content_gemini_required)):
                 raise
             if stage in ("content_analysis", "clip", "subtitle"):  # Core stages - stop on failure
                 console.print(f"[red]Core stage '{escape(stage)}' failed. Stopping pipeline.[/red]")
@@ -369,6 +375,12 @@ def save_manifest(pipeline_data: dict, results: dict, elapsed: float, config: di
             "key_moments": len(ca.get("key_moments", [])),
             "summary": ca.get("summary", ""),
             "overall_sentiment": ca.get("sentiment", {}).get("overall", ""),
+            "content_type": ca.get("content_type", "unknown"),
+            "entities": ca.get("entities", []),
+            "corrected_terms": ca.get("corrected_terms", []),
+            "gemini_analyzed": ca.get("gemini_analyzed", False),
+            "gemini_model": ca.get("gemini_model"),
+            "gemini_chunks_analyzed": ca.get("gemini_chunks_analyzed", 0),
         }
 
     for clip in pipeline_data.get("clips", []):

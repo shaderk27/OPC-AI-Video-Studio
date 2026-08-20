@@ -41,7 +41,7 @@ class RunRequest(BaseModel):
     )
     gemini_required: bool = Field(
         True,
-        description="Fail the run if Gemini transcript or visual clip review cannot be completed",
+        description="Fail the run if Gemini content analysis or clip review cannot be completed",
     )
 
 

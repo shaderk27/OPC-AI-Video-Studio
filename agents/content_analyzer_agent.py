@@ -30,6 +30,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from agents.base_agent import BaseAgent
 from utils.video_utils import get_video_info, extract_audio
 from utils.subtitle_utils import transcribe_audio, detect_language_from_segments
+from utils.gemini_clip_reviewer import GeminiRequiredError
+from utils.gemini_content_analyzer import (
+    GeminiContentAnalyzer,
+    GeminiContentAnalysisError,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -111,13 +116,26 @@ class ContentAnalyzerAgent(BaseAgent):
         )
         self.ca_config = config.get("content_analyzer", {})
         self.paths = config.get("paths", {})
-        self.whisper_model = config.get("subtitle_agent", {}).get("whisper_model", "base")
-        self.source_lang = config.get("subtitle_agent", {}).get("source_language")
+        subtitle_config = config.get("subtitle_agent", {})
+        self.whisper_model = subtitle_config.get("whisper_model", "small")
+        self.source_lang = subtitle_config.get("source_language")
+        self.whisper_beam_size = subtitle_config.get("beam_size", 5)
+        self.whisper_vad_filter = subtitle_config.get("vad_filter", True)
+        self.whisper_vad_min_silence_ms = subtitle_config.get(
+            "vad_min_silence_ms", 300
+        )
+        self.whisper_vocabulary_hints = subtitle_config.get(
+            "vocabulary_hints", []
+        )
         self.max_topics = self.ca_config.get("max_topics", 8)
         self.chapter_min_duration = self.ca_config.get("chapter_min_duration", 30.0)
         self.key_moment_count = self.ca_config.get("key_moment_count", 10)
         self.summary_sentence_count = self.ca_config.get("summary_sentences", 3)
         self.save_report = self.ca_config.get("save_report", True)
+        self.gemini_analyzer = GeminiContentAnalyzer(config)
+        self.gemini_required = self.gemini_analyzer.required
+        if self.gemini_required:
+            self.gemini_analyzer.enabled = True
 
     def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -148,7 +166,15 @@ class ContentAnalyzerAgent(BaseAgent):
 
         self.log(f"Transcribing full video ({total_duration:.0f}s) with Whisper "
                  f"({self.whisper_model})...")
-        segments = transcribe_audio(temp_audio, self.whisper_model, language=self.source_lang)
+        segments = transcribe_audio(
+            temp_audio,
+            self.whisper_model,
+            language=self.source_lang,
+            beam_size=self.whisper_beam_size,
+            vad_filter=self.whisper_vad_filter,
+            vad_min_silence_ms=self.whisper_vad_min_silence_ms,
+            vocabulary_hints=self.whisper_vocabulary_hints,
+        )
 
         # Clean up temp audio
         try:
@@ -185,7 +211,31 @@ class ContentAnalyzerAgent(BaseAgent):
         self.log("Generating summary...")
         summary = self._generate_summary(segments, topics, key_moments)
 
-        # Step 4: Assemble the analysis report
+        # Step 4: Replace shallow language interpretation with Gemini's
+        # transcript-only semantic analysis while preserving local measurements.
+        gemini_analysis = self._run_gemini_analysis(
+            segments,
+            total_duration,
+            detected_lang,
+            topics,
+            summary,
+        )
+        if gemini_analysis:
+            topics = gemini_analysis.get("topics") or topics
+            chapters = gemini_analysis.get("chapters") or chapters
+            key_moments = gemini_analysis.get("key_moments") or key_moments
+            summary = gemini_analysis.get("summary") or summary
+            gemini_sentiment = gemini_analysis.get("sentiment", {})
+            if gemini_sentiment:
+                sentiment["overall"] = gemini_sentiment.get(
+                    "overall", sentiment.get("overall", "unknown")
+                )
+                sentiment["emotional_arc_summary"] = gemini_sentiment.get(
+                    "emotional_arc", ""
+                )
+            narrative["gemini"] = gemini_analysis.get("narrative", {})
+
+        # Step 5: Assemble the analysis report
         analysis = {
             "video_name": video_name,
             "video_duration": total_duration,
@@ -200,6 +250,14 @@ class ContentAnalyzerAgent(BaseAgent):
             "key_moments": key_moments,
             "summary": summary,
             "segments": segments,  # Full transcript for downstream agents
+            "content_type": gemini_analysis.get("content_type", "unknown"),
+            "entities": gemini_analysis.get("entities", []),
+            "corrected_terms": gemini_analysis.get("corrected_terms", []),
+            "gemini_analyzed": bool(gemini_analysis),
+            "gemini_model": (
+                self.gemini_analyzer.model if gemini_analysis else None
+            ),
+            "gemini_chunks_analyzed": gemini_analysis.get("chunks_analyzed", 0),
         }
 
         # Save report
@@ -225,6 +283,59 @@ class ContentAnalyzerAgent(BaseAgent):
             "full_transcript": segments,
             "detected_language": detected_lang,
         }
+
+    def _run_gemini_analysis(
+        self,
+        segments: List[Dict],
+        total_duration: float,
+        detected_language: str,
+        local_topics: List[Dict],
+        local_summary: str,
+    ) -> Dict[str, Any]:
+        """Run Gemini semantic analysis with required/optional failure policy."""
+        if not self.gemini_analyzer.available:
+            if self.gemini_required:
+                raise GeminiRequiredError(
+                    "Gemini API is required for Content Analyzer but is unavailable: "
+                    f"{self.gemini_analyzer.unavailable_reason}."
+                )
+            if self.gemini_analyzer.enabled:
+                self.log(
+                    f"Gemini content analysis skipped: "
+                    f"{self.gemini_analyzer.unavailable_reason}",
+                    "warning",
+                )
+            return {}
+
+        try:
+            self.log(
+                f"Analyzing timestamped transcript with {self.gemini_analyzer.model}..."
+            )
+            result = self.gemini_analyzer.analyze(
+                segments,
+                total_duration,
+                detected_language,
+                local_topics,
+                local_summary,
+            )
+        except GeminiContentAnalysisError as exc:
+            if self.gemini_required:
+                raise GeminiRequiredError(
+                    "Gemini API is required for this run, but Content Analyzer "
+                    f"analysis failed: {exc}"
+                ) from exc
+            self.log(
+                f"Gemini content analysis unavailable; keeping local analysis: {exc}",
+                "warning",
+            )
+            return {}
+
+        self.log(
+            f"Gemini analyzed {result.get('chunks_analyzed', 0)} transcript chunk(s), "
+            f"found {len(result.get('topics', []))} topic(s) and "
+            f"{len(result.get('key_moments', []))} key moment(s)"
+        )
+        return result
 
     # ─────────────────────────────────────────────────────────────────────────
     # Topic Detection

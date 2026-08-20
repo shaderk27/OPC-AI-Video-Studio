@@ -8,7 +8,7 @@ A multi-agent platform that turns long videos into short, engaging social media 
 
 Give it a 10+ minute raw video (travel vlog, lecture, match footage, etc.) and the studio will:
 
-1. **Analyze content** — transcribe the full video, detect topics, sentiment, chapters, and key moments
+1. **Analyze content** — transcribe the full video, then use Gemini to detect topics, sentiment, chapters, entities, and key moments
 2. **Find highlights** and cut them into 15-60s clips (using topic relevance, emotion, audio energy, hook scoring, and optional Gemini editorial review)
 3. **Pause for clip approval** so rejected candidates do not receive further processing
 4. **Generate subtitles** in multiple languages
@@ -22,7 +22,7 @@ Give it a 10+ minute raw video (travel vlog, lecture, match footage, etc.) and t
 
 | Agent | Role | What It Does |
 |-------|------|-------------|
-| **Content Analyzer** | Video Content Intelligence Analyst | Pre-analyzes full video: transcribes, detects topics, sentiment, chapters, key moments, generates summary. Enriches all downstream agents. |
+| **Content Analyzer** | Video Content Intelligence Analyst | Transcribes once, then uses Gemini transcript analysis for topics, sentiment, entities, chapters, key moments, and a summary. Enriches all downstream agents. |
 | **Clip Expert** | Video Highlight Cutter | Uses topics, emotion, audio energy, hook scoring, and Gemini transcript + visual review to select complete highlights |
 | **Subtitle Expert** | Multi-Language Subtitle Generator | Uses Whisper for speech-to-text, translates subtitles into any language |
 | **Audio Expert** | Audio Translation Specialist | Translates speech and generates AI voiceover in target languages, merges with video |
@@ -41,7 +41,7 @@ pip install -r requirements.txt
 
 This installs the media-processing dependencies, the optional Google Gen AI client, and FastAPI/uvicorn for the web control panel.
 
-To enable Gemini-assisted clip ranking, copy the environment template and put
+To enable Gemini-assisted content analysis and clip ranking, copy the environment template and put
 your Gemini API key in the local `.env` file. `.env` is ignored by Git, while
 `.env.example` is safe to commit. Do not place the key in `config.yaml`.
 
@@ -54,9 +54,10 @@ Copy-Item .env.example .env
 The application loads the project-level `.env` automatically. A value already
 set in the operating-system environment takes priority over the file.
 
-The default model is `gemini-3.5-flash-lite`. If the key is absent, the request
-times out, or Gemini returns unusable output, the Clip Expert automatically
-keeps its original heuristic ranking.
+The default model is `gemini-3.5-flash-lite`. Gemini is required by default. If
+the key is absent, a request times out, or Gemini returns unusable output, the
+run stops and displays the reason. Turning off **Require Gemini API** allows the
+local Content Analyzer and heuristic clip-ranking fallbacks.
 
 ### 1b. Web Control Panel (optional, recommended for demos)
 
@@ -171,8 +172,10 @@ The Clip Expert uses multiple strategies to find interesting moments:
 - **Silence detection**: Snaps clip boundaries to silence for clean cuts
 - **Combined** (default): Uses all strategies together
 
-When Gemini review is enabled, transcript excerpts, timestamps, topics, scores,
-and lightweight temporary candidate-video proxies are sent to Gemini. Proxies
+When Gemini is enabled, the Content Analyzer sends the timestamped transcript
+for semantic analysis. Clip review sends transcript excerpts, timestamps, topics,
+scores, and lightweight temporary candidate-video proxies. The full source video
+is not uploaded. Proxies
 include surrounding context so Gemini can reject weak candidates or improve
 their boundaries. Local and Gemini-hosted temporary files are deleted after
 review. Configure or disable it in `config.yaml`:
@@ -192,12 +195,11 @@ clip_agent:
     video_blend_weight: 0.8
 ```
 
-**Require Gemini API** is enabled by default in the web control panel, so
-transcript and visual review are mandatory unless you deliberately turn it off
-for a run. Missing credentials, SDK errors, proxy/upload problems, timeouts,
-invalid output, or rejection of every
-candidate then fail the Clip stage and display the reason. Leave it off to
-retain heuristic fallback.
+**Require Gemini API** is enabled by default in the web control panel. Gemini
+transcript analysis and candidate-video review are mandatory unless you
+deliberately turn it off for a run. Missing credentials, SDK errors,
+proxy/upload problems, timeouts, invalid output, or rejection of every candidate
+fail the run and display the reason. Leave it off to retain local fallbacks.
 
 ### Whisper Model Sizes
 
@@ -219,7 +221,7 @@ networks. The studio handles this automatically:
 | huggingface.co | Whisper model download | Blocked | Auto-routes through **hf-mirror.com**, caches under `models/whisper/` |
 | translate.google.com | Subtitle translation | Blocked | Falls back to **MyMemory** (mymemory.translated.net) |
 | gTTS (Google) | Text-to-speech | Blocked | Uses **Edge TTS** by default (`tts_engine: "edge"`) |
-| Gemini API | Transcript + visual clip review, required by default | May be unavailable | The run fails visibly; turn off **Require Gemini API** for a deliberate local fallback |
+| Gemini API | Transcript content analysis + visual clip review, required by default | May be unavailable | The run fails visibly; turn off **Require Gemini API** for a deliberate local fallback |
 
 - **Pre-download the Whisper model** (optional but recommended on first run):
 
@@ -288,7 +290,7 @@ networks. The studio handles this automatically:
 
 Beyond the three core experts (Clip, Subtitle, Audio), the studio includes five enhancement agents:
 
-1. **Content Analyzer** - Pre-analyzes full video for topics, sentiment, chapters, key moments, and summary. Runs before Clip Expert to enable smarter highlight selection and avoid duplicate transcription.
+1. **Content Analyzer** - Transcribes the full video once and uses Gemini on the timestamped transcript for topics, sentiment, entities, chapters, key moments, and summary. Runs before Clip Expert to enable smarter highlight selection and avoid duplicate transcription.
 2. **Thumbnail Generator** - Extracts visually striking frames and adds text overlays
 3. **Social Media Copywriter** - Writes platform-specific captions with hashtags
 4. **Format Adapter** - Converts clips to 9:16, 16:9, and 1:1 aspect ratios. Identical target resolutions are rendered once and shared across platforms, so TikTok/Shorts/Reels don't triple-encode the same 1080x1920 video

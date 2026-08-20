@@ -32,6 +32,9 @@ class GeminiRequiredPipelineTests(unittest.TestCase):
         review = config["clip_agent"]["gemini_review"]
         self.assertTrue(review["enabled"])
         self.assertTrue(review["required"])
+        content_review = config["content_analyzer"]["gemini_analysis"]
+        self.assertTrue(content_review["enabled"])
+        self.assertTrue(content_review["required"])
 
     def test_web_run_rejects_required_mode_when_setup_is_invalid(self):
         request = WebRunRequest(video="input/example.mp4", gemini_required=True)

@@ -167,7 +167,7 @@ def _defaults(cfg: dict) -> dict:
         "tts_engine": aud.get("tts_engine", "edge"),
         "formats": [f["platform"] for f in fmt.get("formats", [])],
         "stages": [s["id"] for s in STAGES],
-        "whisper_model": sub.get("whisper_model", "base"),
+        "whisper_model": sub.get("whisper_model", "small"),
         "max_clips": clp.get("max_clips", 5),
         "min_clip_duration": clp.get("min_clip_duration", 15),
         "max_clip_duration": clp.get("max_clip_duration", 60),
@@ -303,8 +303,13 @@ def _apply_overrides(cfg: dict, req: WebRunRequest, run: dict):
     clp["snap_to_silence"] = pick(req.snap_to_silence, d["snap_to_silence"])
     gemini = clp.setdefault("gemini_review", {})
     gemini["required"] = pick(req.gemini_required, d["gemini_required"])
+    content_gemini = cfg.setdefault("content_analyzer", {}).setdefault(
+        "gemini_analysis", {}
+    )
+    content_gemini["required"] = gemini["required"]
     if gemini["required"]:
         gemini["enabled"] = True
+        content_gemini["enabled"] = True
 
     fmt = cfg.setdefault("format_agent", {})
     selected = set(pick(req.formats, d["formats"]))
@@ -322,8 +327,11 @@ def _apply_overrides(cfg: dict, req: WebRunRequest, run: dict):
     # stage selection -> skip list
     all_stages = [s["id"] for s in STAGES]
     active = [s for s in all_stages if s in set(pick(req.stages, d["stages"]))]
-    if gemini["required"] and "clip" not in active:
-        active = [s for s in all_stages if s in set(active) | {"clip"}]
+    if gemini["required"]:
+        active = [
+            s for s in all_stages
+            if s in set(active) | {"content_analysis", "clip"}
+        ]
     if pick(req.thumbnail_enabled, True) is False and "thumbnail" in active:
         active.remove("thumbnail")
     skip = [s for s in all_stages if s not in active]
@@ -557,16 +565,35 @@ def _burn_subtitles(run: dict, cfg: dict, langs: list):
 def api_run(req: WebRunRequest):
     if ACTIVE_RUN.get("busy"):
         raise HTTPException(409, "A run is already in progress. Wait for it to finish or refresh.")
-    if req.gemini_required:
-        if req.stages is not None and "clip" not in req.stages:
-            raise HTTPException(
-                400, "Require Gemini API also requires the Clip Expert stage."
-            )
-        cfg = load_config()
+    cfg = load_config()
+    effective_gemini_required = (
+        req.gemini_required
+        if req.gemini_required is not None
+        else _defaults(cfg)["gemini_required"]
+    )
+    if effective_gemini_required:
+        if req.stages is not None:
+            missing = {
+                "content_analysis", "clip"
+            } - set(req.stages)
+            if missing:
+                raise HTTPException(
+                    400,
+                    "Require Gemini API also requires Content Analyzer and "
+                    "Clip Expert stages.",
+                )
         gemini = cfg.setdefault("clip_agent", {}).setdefault("gemini_review", {})
         gemini.update({"enabled": True, "required": True})
+        content_gemini = cfg.setdefault("content_analyzer", {}).setdefault(
+            "gemini_analysis", {}
+        )
+        content_gemini.update({"enabled": True, "required": True})
         from utils.gemini_clip_reviewer import GeminiClipReviewer
-        setup_error = GeminiClipReviewer(cfg).configuration_error()
+        from utils.gemini_content_analyzer import GeminiContentAnalyzer
+        setup_error = (
+            GeminiClipReviewer(cfg).configuration_error() or
+            GeminiContentAnalyzer(cfg).configuration_error()
+        )
         if setup_error:
             raise HTTPException(
                 400, f"Gemini API is required but not configured: {setup_error}"
