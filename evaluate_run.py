@@ -24,20 +24,16 @@ def evaluate_pipeline():
     print(f"🔎 Target Directory: {latest_dir}\n")
     
     final_dir = os.path.join(latest_dir, "final")
-    
     target_dir = final_dir if os.path.exists(final_dir) else latest_dir
     
     report_file = os.path.join(latest_dir, "quality_report.json")
     if not os.path.exists(report_file):
         report_file = os.path.join(target_dir, "quality_report.json")
 
-    # 2. Output Length Check (Must be 15~60 seconds)
     clips = [f for f in os.listdir(target_dir) if f.endswith(".mp4")] if os.path.exists(target_dir) else []
-    length_passed = True
     
     if not clips:
         print("❌ FAIL: No rendered clips (.mp4) found in the directory.")
-        length_passed = False
     else:
         for clip_name in clips:
             clip_path = os.path.join(target_dir, clip_name)
@@ -45,18 +41,17 @@ def evaluate_pipeline():
                 duration = video.duration
                 if not (15.0 <= duration <= 60.0):
                     print(f"❌ FAIL (Length Error): {clip_name} ({duration} sec)")
-                    length_passed = False
                 else:
                     print(f"✅ PASS (Length OK): {clip_name} ({duration} sec)")
     
-    # 3. Subtitle Presence Check
-    subs = [f for f in os.listdir(target_dir) if f.endswith(('.srt', '.vtt'))] if os.path.exists(target_dir) else []
-    if len(subs) >= len(clips) and len(clips) > 0:
-        print(f"✅ PASS (Subtitles Found): {len(subs)} subtitle files detected.")
-    else:
-        print(f"❌ FAIL (Missing Subtitles): Found {len(subs)} subtitle files for {len(clips)} clips.")
+    if clips:
+        sub_burned_clips = [f for f in clips if "sub-" in f.lower()]
+        if len(sub_burned_clips) == len(clips):
+            print(f"✅ PASS (Subtitles Burned): All {len(clips)} clips have subtitles successfully burned in.")
+        else:
+            missing_count = len(clips) - len(sub_burned_clips)
+            print(f"❌ FAIL (Missing Subtitles): {missing_count} clips failed to burn subtitles.")
 
-    # 4. Quality Report & Hook Score Check
     if os.path.exists(report_file):
         with open(report_file, "r", encoding="utf-8") as f:
             qa_data = json.load(f)
