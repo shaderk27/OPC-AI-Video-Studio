@@ -201,6 +201,46 @@ class SubtitleExpertTests(unittest.TestCase):
             self.assertEqual(2, len(lines))
             self.assertTrue(all(len(line) <= agent.max_chars for line in lines))
 
+    def test_overlong_translation_is_split_without_losing_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = SubtitleAgent(_config(tmp, "subtitle_agent"), _Client())
+            text = (
+                "This season, 8 at-bats, 3 hits, and a grand slam. "
+                "Oh, the ball got away! The ball got away!"
+            )
+            source = [{
+                "cue_id": "cue_0001", "start": 1.0, "end": 7.0,
+                "text": "Korean source commentary",
+            }]
+            raw = {
+                "clip_id": "clip", "source_language": "ko",
+                "target_language": "en", "summary": "baseball",
+                "cues": [{
+                    "cue_id": "cue_0001", "translated_text": text,
+                    "line_break_text": text, "confidence": 0.95, "warning": "",
+                }],
+            }
+
+            plan, errors = agent._validate_plan(raw, "clip", "ko", "en", source)
+
+            self.assertEqual([], errors)
+            self.assertGreater(len(plan["cues"]), 1)
+            self.assertEqual("cue_0001", plan["cues"][0]["cue_id"])
+            self.assertEqual(1.0, plan["cues"][0]["start"])
+            self.assertEqual(7.0, plan["cues"][-1]["end"])
+            self.assertEqual(text, " ".join(
+                cue["translated_text"] for cue in plan["cues"]
+            ))
+            self.assertTrue(all(
+                len(lines := cue["line_break_text"].splitlines()) <= 2
+                and all(len(line) <= agent.max_chars for line in lines)
+                for cue in plan["cues"]
+            ))
+            self.assertTrue(all(
+                left["end"] == right["start"]
+                for left, right in zip(plan["cues"], plan["cues"][1:])
+            ))
+
     def test_canonical_transcript_expands_insufficient_whisper_cues(self):
         with tempfile.TemporaryDirectory() as tmp:
             agent = SubtitleAgent(_config(tmp, "subtitle_agent"), _Client())

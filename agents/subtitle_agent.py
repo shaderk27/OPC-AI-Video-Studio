@@ -550,13 +550,16 @@ class SubtitleAgent(BaseAgent):
                 continue
             source = source_by_id[cue["cue_id"]]
             translated = str(cue.get("translated_text", "")).strip()
-            line_break = self._format_line_break_text(translated)
             if not translated:
                 errors.append(f"{cue.get('cue_id')} has empty translated_text")
+            subtitle_chunks = self._split_text_for_subtitles(translated)
+            line_breaks = [
+                self._format_line_break_text(chunk) for chunk in subtitle_chunks
+            ]
             if any(
                 unicodedata.category(character) == "Cc"
                 and character not in "\n\t"
-                for character in line_break
+                for character in translated
             ):
                 errors.append(f"{cue.get('cue_id')} contains control characters")
             if translated and not self._uses_expected_script(
@@ -566,28 +569,85 @@ class SubtitleAgent(BaseAgent):
                     f"{cue.get('cue_id')} is incompatible with "
                     f"{target_language} script"
                 )
-            lines = line_break.splitlines() or [""]
-            if len(lines) > 2 or any(len(line) > self.max_chars for line in lines):
+            if any(
+                len(lines := line_break.splitlines() or [""]) > 2
+                or any(len(line) > self.max_chars for line in lines)
+                for line_break in line_breaks
+            ):
                 errors.append(f"{cue.get('cue_id')} exceeds line limits")
-            if re.sub(r"\s+", "", line_break) != re.sub(r"\s+", "", translated):
+            if re.sub(r"\s+", "", " ".join(subtitle_chunks)) != re.sub(
+                r"\s+", "", translated
+            ):
                 errors.append(
                     f"{cue.get('cue_id')} line breaks omit or change text"
                 )
-            duration = max(0.1, float(source["end"]) - float(source["start"]))
-            compact_length = len(re.sub(r"\s+", "", line_break))
+            source_start = float(source["start"])
+            source_end = float(source["end"])
+            duration = max(0.1, source_end - source_start)
+            compact_length = len(re.sub(r"\s+", "", translated))
             if compact_length / duration > self.max_reading_speed:
                 errors.append(f"{cue.get('cue_id')} exceeds reading speed")
-            normalized["cues"].append({
-                "cue_id": cue["cue_id"],
-                "start": float(source["start"]),
-                "end": float(source["end"]),
-                "source_text": source["text"],
-                "translated_text": translated,
-                "line_break_text": line_break,
-                "confidence": min(1.0, max(0.0, float(cue.get("confidence", 0)))),
-                "warning": str(cue.get("warning", "")).strip(),
-            })
+            total_weight = max(1, sum(len(chunk) for chunk in subtitle_chunks))
+            current_start = source_start
+            for index, (chunk, line_break) in enumerate(zip(
+                subtitle_chunks, line_breaks
+            ), start=1):
+                if index == len(subtitle_chunks):
+                    chunk_end = source_end
+                else:
+                    chunk_end = current_start + duration * len(chunk) / total_weight
+                normalized["cues"].append({
+                    "cue_id": (
+                        cue["cue_id"] if index == 1 else
+                        f"{cue['cue_id']}_{index:02d}"
+                    ),
+                    "start": round(current_start, 3),
+                    "end": round(chunk_end, 3),
+                    "source_text": source["text"],
+                    "translated_text": chunk,
+                    "line_break_text": line_break,
+                    "confidence": min(
+                        1.0, max(0.0, float(cue.get("confidence", 0)))
+                    ),
+                    "warning": str(cue.get("warning", "")).strip(),
+                })
+                current_start = chunk_end
         return normalized, list(dict.fromkeys(errors))
+
+    def _split_text_for_subtitles(self, text: str) -> List[str]:
+        """Split text only when it cannot fit in one two-line subtitle cue."""
+        normalized = " ".join(str(text or "").split())
+        if not normalized:
+            return [""]
+
+        chunks: List[str] = []
+        current = ""
+        for word in normalized.split(" "):
+            candidate = " ".join(item for item in (current, word) if item)
+            if current and len(textwrap.wrap(
+                candidate,
+                width=self.max_chars,
+                break_long_words=True,
+                break_on_hyphens=False,
+            )) > 2:
+                chunks.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            chunks.append(current)
+
+        # A language without spaces, or an unusually long token, still needs a
+        # lossless fallback. Character slicing preserves the exact text.
+        capacity = max(1, self.max_chars * 2)
+        return [
+            part
+            for chunk in chunks
+            for part in (
+                [chunk] if len(chunk) <= capacity else
+                [chunk[index:index + capacity] for index in range(0, len(chunk), capacity)]
+            )
+        ]
 
     def _format_line_break_text(self, text: str) -> str:
         """Apply deterministic two-line wrapping instead of trusting Gemini."""
