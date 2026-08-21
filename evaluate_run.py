@@ -1,22 +1,11 @@
 import os
 import json
-import cv2
+from moviepy.editor import VideoFileClip
 
 OUTPUT_DIR = "output/"
 CLIPS_DIR = os.path.join(OUTPUT_DIR, "formatted")
 SUBS_DIR = os.path.join(OUTPUT_DIR, "subtitles")
 REPORT_FILE = os.path.join(OUTPUT_DIR, "quality_report.json")
-
-def get_video_duration(video_path):
-    # OpenCV를 사용하여 영상 길이를 안전하게 추출합니다.
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        return 0.0
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    duration = frame_count / fps if fps > 0 else 0.0
-    cap.release()
-    return duration
 
 def evaluate_pipeline():
     print("--- 📊 Starting Pipeline Automated QA Check ---\n")
@@ -26,13 +15,13 @@ def evaluate_pipeline():
     length_passed = True
     for clip_name in clips:
         clip_path = os.path.join(CLIPS_DIR, clip_name)
-        duration = get_video_duration(clip_path)
-        
-        if not (15.0 <= duration <= 60.0):
-            print(f"❌ FAIL (Length Error): {clip_name} ({duration:.2f} sec)")
-            length_passed = False
-        else:
-            print(f"✅ PASS (Length OK): {clip_name} ({duration:.2f} sec)")
+        with VideoFileClip(clip_path) as video:
+            duration = video.duration
+            if not (15.0 <= duration <= 60.0):
+                print(f"❌ FAIL (Length Error): {clip_name} ({duration} sec)")
+                length_passed = False
+            else:
+                print(f"✅ PASS (Length OK): {clip_name} ({duration} sec)")
     
     if not clips:
         print("❌ FAIL: No rendered clips found in the directory.")
@@ -49,6 +38,7 @@ def evaluate_pipeline():
     if os.path.exists(REPORT_FILE):
         with open(REPORT_FILE, "r", encoding="utf-8") as f:
             qa_data = json.load(f)
+            # Assuming the QA report contains a key named 'average_hook_score'
             hook_score = qa_data.get("average_hook_score", 0)
             if hook_score >= 60:
                 print(f"✅ PASS (Hook Score): {hook_score}/100 (Target: >= 60)")
