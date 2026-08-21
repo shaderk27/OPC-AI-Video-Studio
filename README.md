@@ -8,25 +8,26 @@ A multi-agent platform that turns long videos into short, engaging social media 
 
 Give it a 10+ minute raw video (travel vlog, lecture, match footage, etc.) and the studio will:
 
-1. **Analyze content** — transcribe the full video, detect topics, sentiment, chapters, and key moments
-2. **Find highlights** and cut them into 15-60s clips (using the content analysis for smarter selection)
-3. **Generate subtitles** in multiple languages
-4. **Translate audio** into multiple languages with AI voiceover
-5. **Create thumbnails** for each clip
-6. **Write social media copy** for TikTok, YouTube, Instagram, X
-7. **Format clips** for each platform (vertical, horizontal, square)
-8. **Review quality** and generate a report
+1. **Analyze content** — transcribe the full video, then use Gemini to detect topics, sentiment, chapters, entities, and key moments
+2. **Find highlights** and cut them into 15-60s clips (using topic relevance, emotion, audio energy, hook scoring, and optional Gemini editorial review)
+3. **Pause for clip approval** so rejected candidates do not receive further processing
+4. **Plan subtitles and dubbing** with two isolated Gemini expert agents
+5. **Pause for localization approval**, then render timed subtitles and aligned multilingual voiceover
+6. **Create thumbnails** for each clip
+7. **Write social media copy** for TikTok, YouTube, Instagram, X, Douyin, and Xiaohongshu
+8. **Format clips** for each platform (vertical, horizontal, square)
+9. **Review quality** and generate a report
 
 ## The AI Agent Team
 
 | Agent | Role | What It Does |
 |-------|------|-------------|
-| **Content Analyzer** | Video Content Intelligence Analyst | Pre-analyzes full video: transcribes, detects topics, sentiment, chapters, key moments, generates summary. Enriches all downstream agents. |
-| **Clip Expert** | Video Highlight Cutter | Uses content analysis + audio energy to find interesting moments, cuts them into short clips |
-| **Subtitle Expert** | Multi-Language Subtitle Generator | Uses Whisper for speech-to-text, translates subtitles into any language |
-| **Audio Expert** | Audio Translation Specialist | Translates speech and generates AI voiceover in target languages, merges with video |
+| **Content Analyzer** | Video Content Intelligence Analyst | Transcribes once, then uses Gemini transcript analysis for topics, sentiment, entities, chapters, key moments, and a summary. Enriches all downstream agents. |
+| **Clip Expert** | Video Highlight Cutter | Uses topics, emotion, audio energy, hook scoring, and Gemini transcript + visual review to select complete highlights |
+| **Subtitle Expert** | Gemini Subtitle Localization Expert | Uses Whisper timestamps as immutable evidence, then Gemini localizes, punctuates, and line-breaks every cue under a strict schema |
+| **Audio Expert** | Gemini Audio Localization and Dubbing Expert | Consumes the transcript plus SubtitlePlan, writes a separate spoken adaptation, generates cue-level Gemini TTS with Edge fallback, and preserves background ambience |
 | **Thumbnail Generator** | Thumbnail Creator | Extracts key frames and adds text overlays for eye-catching thumbnails |
-| **Social Media Copywriter** | Content Strategist | Writes platform-specific captions and hashtags |
+| **Social Media Copywriter** | Content Strategist | Writes platform-specific captions and hashtags, including distinct Douyin and Xiaohongshu styles |
 | **Format Adapter** | Multi-Platform Formatter | Resizes clips for TikTok (9:16), YouTube (16:9), Instagram (1:1). Platforms with the same dimensions share one render (TikTok/Shorts/Reels → single 1080x1920 file) |
 | **Quality Reviewer** | QA Specialist | Checks audio levels, subtitle sync, silence gaps, generates quality report |
 
@@ -38,7 +39,50 @@ Give it a 10+ minute raw video (travel vlog, lecture, match footage, etc.) and t
 pip install -r requirements.txt
 ```
 
-This installs: moviepy, imageio-ffmpeg (bundled ffmpeg, no system install needed), faster-whisper, deep-translator, gTTS, pyyaml, rich, pysrt, Pillow.
+This installs the media-processing dependencies, the optional Google Gen AI client, and FastAPI/uvicorn for the web control panel.
+
+To enable Gemini-assisted content analysis and clip ranking, copy the environment template and put
+your Gemini API key in the local `.env` file. `.env` is ignored by Git, while
+`.env.example` is safe to commit. Do not place the key in `config.yaml`.
+
+```powershell
+Copy-Item .env.example .env
+# Edit .env and replace the placeholder:
+# GEMINI_API_KEY=your-api-key
+```
+
+The application loads the project-level `.env` automatically. A value already
+set in the operating-system environment takes priority over the file.
+
+The default text model is `gemini-3.5-flash-lite`. Gemini is required by default. If
+the key is absent, a request times out, or Gemini returns unusable output, the
+run stops and displays the reason. Turning off **Require Gemini API** allows the
+local Content Analyzer and heuristic clip-ranking fallbacks. Subtitle and Audio
+Expert reasoning remains Gemini-backed whenever those stages are selected.
+
+For best speech replacement, install the optional isolated Python 3.13 source
+separation runtime. If it is unavailable, the Audio Expert continues with a
+visible speech-aware-ducking warning.
+
+```powershell
+.\scripts\setup_audio_separator.ps1
+```
+
+### 1b. Web Control Panel (optional, recommended for demos)
+
+```bash
+python scripts/start_web.py       # opens http://127.0.0.1:8000
+```
+
+The web UI wraps the whole pipeline — no CLI needed:
+
+- **Setup** — pick or upload a video, choose subtitle languages (separate subtitle files, burned directly into the video, or both), audio voiceover languages, and output formats (grouped by aspect ratio — TikTok/Shorts/Reels share one 1080×1920 render). Advanced options cover Whisper model size, clip count & durations, detection strategy, padding/snap-to-silence, TTS engine/speed/volumes, caption tone, thumbnails, quality checks, and per-agent toggles.
+- **Live progress** — real-time stage rail + log console (Server-Sent Events, with polling fallback).
+- **Two human review gates** — first approve or drop highlight clips; later edit and approve each language's SubtitlePlan and DubbingPlan before any localization is rendered.
+- **Gallery** — download clips, subtitles, translated audio, formatted platform versions, thumbnails and social copy.
+- **Demo Mode** — if the backend isn't running, the UI plays a simulated run so you can preview the workflow anytime.
+
+API contract between the frontend and the FastAPI backend: `web/API.md`.
 
 ### 2. Configure Your Studio
 
@@ -60,24 +104,40 @@ python main.py input/travel_vlog.mp4 --languages en,zh,ja --max-clips 5
 
 # Skip certain stages
 python main.py input/lecture.mp4 --skip thumbnail,quality
+
+# Store the dated run folder under a different archive root
+python main.py input/travel_vlog.mp4 --output demo-output
 ```
 
 ### 4. Find Your Output
 
-All generated content goes to the `output/` directory:
+Every processing attempt receives its own folder. The default convention is
+`output/YYYY-MM-DD/HH-MM-SS_video-name_run-id/`, so processing the same video
+again does not overwrite earlier clips, reports, or captions. `--output`
+changes the archive root while preserving the dated run-folder structure.
 
 ```
 output/
-├── content_analysis.json  # Full content analysis (topics, sentiment, chapters, key moments)
-├── clips/              # Short highlight clips (MP4)
-├── subtitles/          # SRT, VTT, TXT files per language
-├── audio/              # Translated audio clips (MP4 + MP3 voiceover)
-├── thumbnails/         # Thumbnail images (PNG)
-├── social/             # Social media copy (JSON)
-├── formatted/          # Formatted clips (named by resolution, e.g. ..._1080x1920.mp4)
-├── manifest.json       # Master index of all generated content
-└── quality_report.json # Quality review report
+└── 2026-08-19/
+    └── 14-32-08_shenzhen-travel_a3f1b2c4/
+        ├── content_analysis.json  # Topics, sentiment, chapters, and key moments
+        ├── manifest.json          # Approved outputs and their paths
+        ├── quality_report.json    # Quality review results
+        ├── review_decisions.json  # Approved and rejected clip candidates
+        ├── localization_review_decisions.json # Approved/edited expert plans
+        ├── agent_traces/          # Prompts, schemas, results, retries and fallbacks
+        ├── clips/                 # Raw highlight candidates (MP4)
+        ├── subtitles/             # SRT, VTT, and TXT files per language
+        ├── audio/                 # Translated audio and voiceover files
+        ├── thumbnails/            # Thumbnail images (PNG)
+        ├── social/                # Platform captions and hashtags (JSON)
+        ├── formatted/             # Platform-specific video dimensions
+        └── burned/                # Videos with embedded subtitles
 ```
+
+Rejected raw candidates remain in that run's `clips/` folder for inspection,
+but they are excluded from `manifest.json` and do not receive downstream
+processing.
 
 ## Configuration
 
@@ -116,11 +176,59 @@ audio_agent:
 The Clip Expert uses multiple strategies to find interesting moments:
 
 - **Transcript analysis**: Searches for keywords, detects questions, exclamations, content density
-- **Audio energy**: Finds high-energy moments (cheers, laughter, emphasis)
+- **Content topics**: Scores candidates against Content Analyzer topics and promotes diverse relevant moments
+- **Emotion + audio energy**: Rewards moments where strong sentiment and audible energy occur together
+- **Hook score**: Ranks opening strength, emotion, audio energy, specificity, and coherence
+- **Gemini editorial review**: Reviews timestamped transcript excerpts, then inspects temporary candidate-video proxies for hook, payoff, visual interest, standalone completeness, and safer clip boundaries
 - **Silence detection**: Snaps clip boundaries to silence for clean cuts
 - **Combined** (default): Uses all strategies together
 
+When Gemini is enabled, the Content Analyzer sends the timestamped transcript
+for semantic analysis. Clip review sends transcript excerpts, timestamps, topics,
+scores, and lightweight temporary candidate-video proxies. The full source video
+is not uploaded. Proxies include surrounding context so Gemini can reject weak
+candidates or improve
+their boundaries. Local and Gemini-hosted temporary files are deleted after
+review. Configure or disable it in `config.yaml`:
+
+```yaml
+clip_agent:
+  max_clips: 5       # target count
+  min_clips: 3       # warn when fewer viable candidates remain
+  gemini_review:
+    enabled: true
+    required: true
+    model: "gemini-3.5-flash-lite"
+    candidate_limit: 12
+    blend_weight: 0.5
+    video_review_enabled: true
+    video_candidate_limit: 10
+    video_context_seconds: 4.0
+    video_min_score: 60
+    video_backfill_min_score: 45
+    video_blend_weight: 0.8
+```
+
+To keep the output count stable, the Clip Expert over-generates candidates and
+targets `max_clips` after review. Candidates accepted by Gemini with a score of
+at least `video_min_score` are selected first. Empty target slots may be filled
+by the strongest candidates scoring at least `video_backfill_min_score`, even
+when Gemini's boolean accept/reject decision varies. Candidates below the
+backfill floor remain excluded, so a weak source video can still produce fewer
+than the target. The run manifest records the complete candidate funnel.
+
+**Require Gemini API** is enabled by default in the web control panel. Gemini
+transcript analysis and candidate-video review are mandatory unless you
+deliberately turn it off for a run. Missing credentials, SDK errors,
+proxy/upload problems, timeouts, invalid output, or rejection of every candidate
+fail the run and display the reason. Leave it off to retain local fallbacks.
+
 ### Whisper Model Sizes
+
+The studio uses `small` by default because it is noticeably more accurate than
+`base` while remaining practical on a CPU-only machine. The Content Analyzer,
+Clip Expert, and Subtitle Expert share this setting and reuse the full-video
+transcript where possible.
 
 | Model | Size | Speed | Accuracy | RAM |
 |-------|------|-------|----------|-----|
@@ -130,6 +238,47 @@ The Clip Expert uses multiple strategies to find interesting moments:
 | medium | 1.5GB | Slow | High | ~5GB |
 | large-v3 | 3GB | Slowest | Best | ~10GB |
 
+Configure transcription in `config.yaml`:
+
+```yaml
+subtitle_agent:
+  whisper_model: "small"
+  beam_size: 5
+  vad_filter: true
+  vad_min_silence_ms: 300
+  vocabulary_hints: ["important person", "team name", "specialist term"]
+```
+
+`vocabulary_hints` is especially useful for names, locations, teams, brands,
+and technical terminology that Whisper may otherwise misspell.
+
+### Whisper Download and Cache
+
+On its first use, the selected model is downloaded and stored under
+`models/whisper/`. Later runs load it locally and do not require a network
+connection. The downloader tries the configured Hugging Face endpoint, the
+`hf-mirror.com` mirror, and the official endpoint. It can also download directly
+from the mirror when the mirror does not provide metadata headers expected by
+the Hugging Face client.
+
+Pre-download and validate the configured model before starting a long run:
+
+```powershell
+python scripts/setup_whisper_model.py
+```
+
+If `small` cannot be downloaded but a complete `base` model is already cached,
+normal pipeline processing falls back to that cached model instead of failing.
+The setup command does not accept that fallback: it exits with an error unless
+the configured model was downloaded successfully.
+
+If you see `Could not load Whisper model 'small'`:
+
+1. Stop the web server.
+2. Run `python scripts/setup_whisper_model.py` from the project directory.
+3. Confirm it reports that the model is cached locally.
+4. Restart the web server and retry the video.
+
 ## Network Notes (Mainland China)
 
 Some online services used by the studio are blocked or unreachable on CN
@@ -138,10 +287,11 @@ networks. The studio handles this automatically:
 | Service | Used for | CN status | How the studio handles it |
 |---------|----------|-----------|---------------------------|
 | huggingface.co | Whisper model download | Blocked | Auto-routes through **hf-mirror.com**, caches under `models/whisper/` |
-| translate.google.com | Subtitle translation | Blocked | Falls back to **MyMemory** (mymemory.translated.net) |
-| gTTS (Google) | Text-to-speech | Blocked | Uses **Edge TTS** by default (`tts_engine: "edge"`) |
+| Gemini API | Agent reasoning, structured localization plans, and primary TTS | May be unavailable | Required expert reasoning fails visibly; Gemini TTS alone may fall back per cue to Edge TTS |
+| Edge TTS | Per-cue speech fallback | May be unavailable | Used only after a recorded Gemini TTS failure; both failures stop that language |
+| audio-separator model download | Original speech removal | May be unavailable | Uses a visible speech-aware-ducking fallback and records it in the manifest |
 
-- **Pre-download the Whisper model** (optional but recommended on first run):
+- **Pre-download the Whisper model** (recommended before the first long run):
 
   ```bash
   python scripts/setup_whisper_model.py
@@ -173,11 +323,32 @@ networks. The studio handles this automatically:
                     │ (Find & Cut)    │
                     └────────┬────────┘
                              │
+                    ┌────────▼────────┐
+                    │ Human Approval │
+                    │ (Keep or Drop) │
+                    └────────┬────────┘
+                             │
+                    ┌────────▼────────┐
+                    │ Subtitle Expert│
+                    │  SubtitlePlan  │
+                    └────────┬────────┘
+                    ┌────────▼────────┐
+                    │  Audio Expert  │
+                    │  DubbingPlan   │
+                    └────────┬────────┘
+                    ┌────────▼────────┐
+                    │ Localization   │
+                    │ Human Approval │
+                    └────────┬────────┘
+                    ┌────────▼────────┐
+                    │ Render + Tools │
+                    │ Whisper/TTS/FF │
+                    └────────┬────────┘
                  ┌───────────┼───────────┐
                  │           │           │
         ┌────────▼───┐ ┌────▼────┐ ┌───▼────────┐
-        │ Subtitle   │ │ Audio   │ │ Thumbnail  │
-        │ Expert     │ │ Expert  │ │ Generator  │
+        │ Subtitles  │ │ Dubbed  │ │ Thumbnail  │
+        │ SRT/VTT/TXT│ │ Video   │ │ Generator  │
         └────────┬───┘ └────┬────┘ └───┬────────┘
                  │          │          │
         ┌────────▼──────────▼──────────▼────────┐
@@ -203,7 +374,7 @@ networks. The studio handles this automatically:
 
 Beyond the three core experts (Clip, Subtitle, Audio), the studio includes five enhancement agents:
 
-1. **Content Analyzer** - Pre-analyzes full video for topics, sentiment, chapters, key moments, and summary. Runs before Clip Expert to enable smarter highlight selection and avoid duplicate transcription.
+1. **Content Analyzer** - Transcribes the full video once and uses Gemini on the timestamped transcript for topics, sentiment, entities, chapters, key moments, and summary. Runs before Clip Expert to enable smarter highlight selection and avoid duplicate transcription.
 2. **Thumbnail Generator** - Extracts visually striking frames and adds text overlays
 3. **Social Media Copywriter** - Writes platform-specific captions with hashtags
 4. **Format Adapter** - Converts clips to 9:16, 16:9, and 1:1 aspect ratios. Identical target resolutions are rendered once and shared across platforms, so TikTok/Shorts/Reels don't triple-encode the same 1080x1920 video
@@ -213,8 +384,9 @@ Beyond the three core experts (Clip, Subtitle, Audio), the studio includes five 
 
 - **Video Processing**: ffmpeg (bundled via imageio-ffmpeg)
 - **Speech-to-Text**: faster-whisper (Whisper model, CPU)
-- **Translation**: Google Translator with MyMemory fallback (via deep-translator, no API key needed)
-- **Text-to-Speech**: Edge TTS (Microsoft, free) with gTTS fallback
+- **Agent reasoning and localization**: Gemini structured output with isolated Subtitle and Audio prompts/schemas/traces
+- **Text-to-Speech**: Gemini 3.1 Flash TTS Preview with explicit per-cue Edge TTS fallback
+- **Speech separation**: optional isolated audio-separator/UVR two-stem runtime; speech-aware ducking fallback
 - **Video Editing**: moviepy
 - **Image Processing**: Pillow
 

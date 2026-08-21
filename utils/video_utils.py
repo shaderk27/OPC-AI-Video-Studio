@@ -10,6 +10,7 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -32,12 +33,38 @@ def _find_ffprobe() -> Optional[str]:
     return shutil.which("ffprobe")
 
 
-def _parse_ffmpeg_info(stderr: str) -> Dict:
+def _run_media_command(cmd: List[str]) -> subprocess.CompletedProcess:
+    """Run ffmpeg/ffprobe without relying on the Windows ANSI code page.
+
+    FFmpeg emits UTF-8 diagnostics. On Windows, ``text=True`` otherwise uses
+    the active locale (commonly cp1252), whose decoder can crash the subprocess
+    reader thread and leave stdout/stderr as ``None``. Replacement decoding
+    preserves all metadata-bearing ASCII text.
+    """
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
+def _media_error_details(stderr: Optional[str], max_chars: int = 1500) -> str:
+    """Return the actionable tail of ffmpeg output instead of its banner."""
+    details = (stderr or "").strip()
+    if not details:
+        return "ffmpeg produced no error details"
+    return details[-max_chars:]
+
+
+def _parse_ffmpeg_info(stderr: Optional[str]) -> Dict:
     """
     Parse `ffmpeg -i <file>` stderr output into a media-info dict.
     ffmpeg always prints stream info to stderr when given only `-i` (no output).
     Returns the same shape as the ffprobe branch of get_video_info().
     """
+    stderr = stderr or ""
     info = {
         "duration": 0.0,
         "width": 0,
@@ -92,7 +119,7 @@ def get_video_info(video_path: str) -> Dict:
             "-show_format", "-show_streams",
             video_path,
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = _run_media_command(cmd)
         if result.returncode == 0:
             try:
                 data = json.loads(result.stdout)
@@ -123,7 +150,7 @@ def get_video_info(video_path: str) -> Dict:
 
     # Fallback: ffmpeg prints media info to stderr when given only `-i`.
     cmd = [FFMPEG_PATH, "-hide_banner", "-i", video_path]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_media_command(cmd)
     return _parse_ffmpeg_info(result.stderr)
 
 
@@ -164,10 +191,55 @@ def cut_clip(
         output_path,
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_media_command(cmd)
     if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg cut failed: {result.stderr[:500]}")
+        raise RuntimeError(
+            f"ffmpeg cut failed: {_media_error_details(result.stderr)}"
+        )
 
+    return output_path
+
+
+def create_review_proxy(
+    video_path: str,
+    start_time: float,
+    end_time: float,
+    output_path: str,
+    max_width: int = 640,
+) -> str:
+    """Create a small, accurately-seeked MP4 for multimodal review.
+
+    Review proxies preserve audio and visual timing while reducing upload size.
+    They are temporary analysis artifacts, not final deliverables.
+    """
+    start = max(0.0, float(start_time))
+    end = max(start, float(end_time))
+    duration = end - start
+    if duration <= 0:
+        raise ValueError("Review proxy duration must be greater than zero")
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        FFMPEG_PATH, "-y",
+        "-ss", f"{start:.3f}",
+        "-i", video_path,
+        "-t", f"{duration:.3f}",
+        "-map", "0:v:0",
+        "-map", "0:a:0?",
+        "-vf", (
+            f"scale={max(160, int(max_width))}:-2:"
+            "force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1"
+        ),
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "32",
+        "-c:a", "aac", "-b:a", "64k", "-ac", "1",
+        "-movflags", "+faststart",
+        output_path,
+    ]
+    result = _run_media_command(cmd)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg review proxy failed: {_media_error_details(result.stderr)}"
+        )
     return output_path
 
 
@@ -187,9 +259,11 @@ def extract_audio(video_path: str, output_path: str, sample_rate: int = 16000) -
         output_path,
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_media_command(cmd)
     if result.returncode != 0:
-        raise RuntimeError(f"Audio extraction failed: {result.stderr[:500]}")
+        raise RuntimeError(
+            f"Audio extraction failed: {_media_error_details(result.stderr)}"
+        )
 
     return output_path
 
@@ -209,7 +283,7 @@ def detect_silence(
         "-f", "null", "-",
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_media_command(cmd)
     silences = []
     current_start = None
 
@@ -240,11 +314,15 @@ def get_audio_energy_segments(
         "-f", "null", "-",
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_media_command(cmd)
     segments = []
     current_time = 0.0
 
-    for line in result.stderr.split("\n"):
+    # ametadata's ``file=-`` output is written to stdout by ffmpeg, while
+    # diagnostics remain on stderr. Parse both for compatibility with ffmpeg
+    # builds that route filter metadata differently.
+    metadata_output = f"{result.stdout}\n{result.stderr}"
+    for line in metadata_output.splitlines():
         if "pts_time:" in line:
             try:
                 current_time = float(line.split("pts_time:")[1].strip())
@@ -311,10 +389,63 @@ def merge_audio_into_video(
         output_path,
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_media_command(cmd)
     if result.returncode != 0:
-        raise RuntimeError(f"Audio merge failed: {result.stderr[:500]}")
+        raise RuntimeError(
+            f"Audio merge failed: {_media_error_details(result.stderr)}"
+        )
 
+    return output_path
+
+
+def merge_voiceover_with_background(
+    video_path: str,
+    voiceover_path: str,
+    output_path: str,
+    *,
+    background_path: str = "",
+    cue_windows: list = None,
+    background_volume: float = 0.9,
+    voiceover_volume: float = 1.0,
+    original_audio_volume: float = 0.45,
+) -> str:
+    """Mix aligned dubbing over a separated stem or speech-aware ducked original."""
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    cue_windows = cue_windows or []
+    if background_path:
+        command = [
+            FFMPEG_PATH, "-y", "-i", video_path, "-i", background_path,
+            "-i", voiceover_path,
+            "-filter_complex",
+            f"[1:a]volume={background_volume}[bg];"
+            f"[2:a]volume={voiceover_volume}[vo];"
+            "[bg][vo]amix=inputs=2:duration=first:normalize=0,"
+            "alimiter=limit=0.95[aout]",
+            "-map", "0:v", "-map", "[aout]", "-c:v", "copy",
+            "-c:a", "aac", "-shortest", output_path,
+        ]
+    else:
+        duck_filters = [f"volume={original_audio_volume}"]
+        for window in cue_windows:
+            start = max(0.0, float(window.get("start", 0)))
+            end = max(start, float(window.get("end", start)))
+            duck_filters.append(
+                f"volume=0.12:enable='between(t,{start:.3f},{end:.3f})'"
+            )
+        original_filter = ",".join(duck_filters)
+        command = [
+            FFMPEG_PATH, "-y", "-i", video_path, "-i", voiceover_path,
+            "-filter_complex",
+            f"[0:a]{original_filter}[bg];"
+            f"[1:a]volume={voiceover_volume}[vo];"
+            "[bg][vo]amix=inputs=2:duration=first:normalize=0,"
+            "alimiter=limit=0.95[aout]",
+            "-map", "0:v", "-map", "[aout]", "-c:v", "copy",
+            "-c:a", "aac", "-shortest", output_path,
+        ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Voiceover mix failed: {result.stderr[:500]}")
     return output_path
 
 
@@ -343,9 +474,11 @@ def resize_video(
         output_path,
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_media_command(cmd)
     if result.returncode != 0:
-        raise RuntimeError(f"Resize failed: {result.stderr[:500]}")
+        raise RuntimeError(
+            f"Resize failed: {_media_error_details(result.stderr)}"
+        )
 
     return output_path
 
@@ -358,26 +491,40 @@ def burn_subtitles_into_video(
     """
     Burn subtitle file (SRT) directly into video (hardcoded subtitles).
     """
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    output = Path(output_path).resolve()
+    source_video = Path(video_path).resolve()
+    source_subtitle = Path(subtitle_path).resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if not source_subtitle.is_file():
+        raise FileNotFoundError(f"Subtitle file not found: {source_subtitle}")
 
-    # Escape Windows path separators for ffmpeg subtitles filter
-    sub_path_escaped = subtitle_path.replace("\\", "/").replace(":", "\\:")
+    # FFmpeg's subtitles filter parses ':' and '\\' as filter syntax on Windows.
+    # A unique cwd-relative copy avoids drive-letter, spaces, apostrophe and
+    # concurrent-render collisions without relying on fragile escape sequences.
+    with tempfile.TemporaryDirectory(
+        prefix="subtitle-burn-", dir=str(output.parent)
+    ) as temp_dir:
+        local_subtitle = Path(temp_dir) / f"subtitle{source_subtitle.suffix or '.srt'}"
+        shutil.copy2(source_subtitle, local_subtitle)
+        cmd = [
+            FFMPEG_PATH, "-y",
+            "-i", str(source_video),
+            "-vf", f"subtitles='{local_subtitle.name}'",
+            "-c:v", "libx264", "-preset", "fast",
+            "-c:a", "copy",
+            "-movflags", "+faststart",
+            str(output),
+        ]
 
-    cmd = [
-        FFMPEG_PATH, "-y",
-        "-i", video_path,
-        "-vf", f"subtitles='{sub_path_escaped}'",
-        "-c:v", "libx264", "-preset", "fast",
-        "-c:a", "copy",
-        "-movflags", "+faststart",
-        output_path,
-    ]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, cwd=temp_dir
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Subtitle burn failed: {_media_error_details(result.stderr)}"
+            )
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"Subtitle burn failed: {result.stderr[:500]}")
-
-    return output_path
+    return str(output)
 
 
 def extract_frame(video_path: str, timestamp: float, output_path: str) -> str:
@@ -393,9 +540,11 @@ def extract_frame(video_path: str, timestamp: float, output_path: str) -> str:
         output_path,
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = _run_media_command(cmd)
     if result.returncode != 0:
-        raise RuntimeError(f"Frame extraction failed: {result.stderr[:500]}")
+        raise RuntimeError(
+            f"Frame extraction failed: {_media_error_details(result.stderr)}"
+        )
 
     return output_path
 

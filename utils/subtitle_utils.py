@@ -6,6 +6,10 @@ Uses faster-whisper for speech-to-text and deep-translator for translation.
 """
 
 import os
+import re
+import sys
+import time
+import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -35,6 +39,7 @@ GOOGLE_REACHABLE = _google_reachable()
 STUDIO_ROOT = Path(__file__).resolve().parent.parent
 WHISPER_MODELS_DIR = STUDIO_ROOT / "models" / "whisper"
 HF_MIRROR = "https://hf-mirror.com"
+HF_OFFICIAL = "https://huggingface.co"
 
 
 def _resolve_hf_endpoint() -> str:
@@ -45,58 +50,153 @@ def _resolve_hf_endpoint() -> str:
     return HF_MIRROR
 
 
-def _whisper_model_cached(model_size: str) -> bool:
-    """True if the Whisper model files already exist locally (skip network entirely)."""
+def _activate_hf_endpoint(endpoint: str) -> None:
+    """Apply an endpoint even if huggingface_hub was imported previously."""
+    os.environ["HF_ENDPOINT"] = endpoint
+    constants = sys.modules.get("huggingface_hub.constants")
+    if constants is not None:
+        constants.ENDPOINT = endpoint
+
+
+def _cached_whisper_model_path(model_size: str) -> Optional[Path]:
+    """Return a complete local model directory, or ``None``."""
     root = WHISPER_MODELS_DIR
+    required_files = ("config.json", "model.bin", "tokenizer.json", "vocabulary.txt")
+
+    def complete(path: Path) -> bool:
+        return all((path / filename).is_file() for filename in required_files)
+
     if not root.exists():
-        return False
+        return None
     # HF cache layout: <root>/models--Systran--faster-whisper-<size>/snapshots/<rev>/model.bin
     cache_dir = root / f"models--Systran--faster-whisper-{model_size}"
     if cache_dir.exists() and (cache_dir / "snapshots").exists():
         for snap in (cache_dir / "snapshots").iterdir():
-            if (snap / "model.bin").is_file():
-                return True
+            if complete(snap):
+                return snap
     # local_dir layout: files placed directly in <root>/<size>/
-    if (root / model_size / "model.bin").is_file():
-        return True
-    return False
+    if complete(root / model_size):
+        return root / model_size
+    return None
 
 
-def _load_whisper_model(model_size: str):
+def _whisper_model_cached(model_size: str) -> bool:
+    """True if the Whisper model files already exist locally."""
+    return _cached_whisper_model_path(model_size) is not None
+
+
+def _download_whisper_model_direct(model_size: str) -> Path:
+    """Download standard Faster Whisper files without Hub metadata requests."""
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", model_size):
+        raise ValueError(f"Invalid Whisper model name: {model_size!r}")
+
+    destination = WHISPER_MODELS_DIR / model_size
+    destination.mkdir(parents=True, exist_ok=True)
+    repo = f"Systran/faster-whisper-{model_size}"
+    required_files = ("config.json", "model.bin", "tokenizer.json", "vocabulary.txt")
+
+    for filename in required_files:
+        target = destination / filename
+        if target.is_file() and target.stat().st_size > 0:
+            continue
+        partial = destination / f"{filename}.part"
+        url = f"{HF_MIRROR}/{repo}/resolve/main/{filename}?download=true"
+        last_error = None
+        for attempt in range(1, 7):
+            offset = partial.stat().st_size if partial.is_file() else 0
+            headers = {"Range": f"bytes={offset}-"} if offset else {}
+            try:
+                with requests.get(
+                    url, stream=True, timeout=(15, 180),
+                    allow_redirects=True, headers=headers,
+                ) as response:
+                    response.raise_for_status()
+                    resumed = offset > 0 and response.status_code == 206
+                    mode = "ab" if resumed else "wb"
+                    with partial.open(mode) as output:
+                        for chunk in response.iter_content(
+                            chunk_size=1024 * 1024
+                        ):
+                            if chunk:
+                                output.write(chunk)
+                partial.replace(target)
+                last_error = None
+                break
+            except Exception as exc:
+                # Keep the .part file. The next request resumes from its
+                # current byte count instead of restarting a large model.
+                last_error = exc
+                if attempt < 6:
+                    time.sleep(min(8, attempt * 2))
+        if last_error is not None:
+            raise last_error
+    return destination
+
+
+def _load_whisper_model(model_size: str, allow_fallback: bool = True):
     """
     Load faster-whisper model, routing downloads through a CN-reachable mirror.
     Models are cached under models/whisper/ so re-runs work fully offline.
     """
+    endpoint = _resolve_hf_endpoint()
+    # This must happen before importing faster_whisper/huggingface_hub. The Hub
+    # reads HF_ENDPOINT during import and otherwise keeps the old endpoint.
+    _activate_hf_endpoint(endpoint)
     from faster_whisper import WhisperModel
 
-    endpoint = _resolve_hf_endpoint()
     kwargs = dict(
         device="cpu",
         compute_type="int8",
         download_root=str(WHISPER_MODELS_DIR),
     )
-    if _whisper_model_cached(model_size):
-        kwargs["local_files_only"] = True
+    cached_path = _cached_whisper_model_path(model_size)
+    if cached_path:
+        return WhisperModel(str(cached_path), device="cpu", compute_type="int8")
 
+    endpoints = []
+    for candidate in (endpoint, HF_MIRROR, HF_OFFICIAL):
+        if candidate not in endpoints:
+            endpoints.append(candidate)
+
+    errors = []
+    for candidate in endpoints:
+        _activate_hf_endpoint(candidate)
+        try:
+            return WhisperModel(model_size, **kwargs)
+        except Exception as exc:
+            errors.append(f"{candidate}: {exc}")
+
+    # Some mirrors serve files correctly but omit metadata headers required by
+    # huggingface_hub. A streamed GET avoids that HEAD/metadata failure.
     try:
-        return WhisperModel(model_size, **kwargs)
-    except Exception as e:
-        # If the configured endpoint failed (e.g. user set huggingface.co on a CN
-        # network), retry once through the mirror before giving up.
-        if os.environ.get("HF_ENDPOINT") != HF_MIRROR:
-            os.environ["HF_ENDPOINT"] = HF_MIRROR
-            kwargs.pop("local_files_only", None)
-            try:
-                return WhisperModel(model_size, **kwargs)
-            except Exception:
-                pass
-        raise RuntimeError(
-            f"Could not load Whisper model '{model_size}' (endpoint: {endpoint}).\n"
-            f"Network error: {e}\n"
-            f"Fix options:\n"
-            f"  1) set HF_ENDPOINT=https://hf-mirror.com\n"
-            f"  2) pre-download once: python scripts/setup_whisper_model.py"
-        ) from e
+        direct_path = _download_whisper_model_direct(model_size)
+        return WhisperModel(
+            str(direct_path), device="cpu", compute_type="int8"
+        )
+    except Exception as exc:
+        errors.append(f"direct mirror download: {exc}")
+
+    fallback_path = _cached_whisper_model_path("base")
+    if allow_fallback and model_size != "base" and fallback_path:
+        warnings.warn(
+            f"Could not download Whisper '{model_size}'. Falling back to the "
+            "cached 'base' model so processing can continue.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return WhisperModel(
+            str(fallback_path), device="cpu", compute_type="int8"
+        )
+
+    error_summary = "\n".join(f"  - {item}" for item in errors)
+    raise RuntimeError(
+        f"Could not load Whisper model '{model_size}'.\n"
+        f"Tried endpoints: {', '.join(endpoints)}\n"
+        f"Errors:\n{error_summary or '  - unknown model-loading error'}\n"
+        f"Fix options:\n"
+        f"  1) pre-download once: python scripts/setup_whisper_model.py\n"
+        f"  2) temporarily set whisper_model: \"base\" in config.yaml"
+    )
 
 
 # Language code mapping for Google Translator
@@ -126,8 +226,12 @@ LANG_MAP = {
 
 def transcribe_audio(
     audio_path: str,
-    model_size: str = "base",
+    model_size: str = "small",
     language: Optional[str] = None,
+    beam_size: int = 5,
+    vad_filter: bool = True,
+    vad_min_silence_ms: int = 300,
+    vocabulary_hints: Optional[List[str]] = None,
 ) -> List[Dict]:
     """
     Transcribe audio file using faster-whisper.
@@ -137,12 +241,23 @@ def transcribe_audio(
     # through hf-mirror.com when huggingface.co is unreachable.
     model = _load_whisper_model(model_size)
 
+    hints = [
+        str(item).strip() for item in (vocabulary_hints or [])
+        if str(item).strip()
+    ]
+    initial_prompt = None
+    if hints:
+        initial_prompt = "Important names and terms: " + ", ".join(hints[:100])
+
     segments, _ = model.transcribe(
         audio_path,
         language=language,
-        beam_size=5,
-        vad_filter=True,
-        vad_parameters=dict(min_silence_duration_ms=300),
+        beam_size=max(1, int(beam_size)),
+        vad_filter=bool(vad_filter),
+        vad_parameters={
+            "min_silence_duration_ms": max(0, int(vad_min_silence_ms))
+        } if vad_filter else None,
+        initial_prompt=initial_prompt,
     )
 
     result = []
@@ -150,7 +265,7 @@ def transcribe_audio(
         result.append({
             "start": round(seg.start, 3),
             "end": round(seg.end, 3),
-            "text": seg.text.strip(),
+            "text": " ".join(seg.text.split()),
         })
 
     return result

@@ -41,6 +41,7 @@ class QualityAgent(BaseAgent):
 
         report = {
             "total_clips": len(clips),
+            "average_hook_score": 0,
             "total_subtitles": 0,
             "total_audio_translations": 0,
             "issues": [],
@@ -52,6 +53,8 @@ class QualityAgent(BaseAgent):
             clip_report = {
                 "clip": clip["filename"],
                 "duration": clip.get("duration", 0),
+                "hook_score": clip.get("hook_score", 0),
+                "hook_score_breakdown": clip.get("hook_score_breakdown", {}),
                 "checks": {},
                 "issues": [],
                 "passed": True,
@@ -90,11 +93,18 @@ class QualityAgent(BaseAgent):
         # Generate summary
         total_issues = len(report["issues"])
         passed_clips = sum(1 for cr in report["clip_reports"] if cr["passed"])
+        hook_scores = [
+            float(clip.get("hook_score", 0)) for clip in clips
+        ]
+        report["average_hook_score"] = round(
+            sum(hook_scores) / len(hook_scores), 1
+        ) if hook_scores else 0
         report["summary"] = {
             "total_issues": total_issues,
             "clips_passed": passed_clips,
             "clips_failed": len(clips) - passed_clips,
             "pass_rate": f"{(passed_clips / len(clips) * 100):.0f}%" if clips else "N/A",
+            "average_hook_score": report["average_hook_score"],
         }
 
         # Save report
@@ -211,6 +221,47 @@ class QualityAgent(BaseAgent):
     def _check_audio_translation(self, clip: Dict, lang: str, lang_data: Dict) -> Dict:
         """Check audio translation quality."""
         issues = []
+
+        previous_end = -1.0
+        for cue in lang_data.get("cues", []):
+            start = float(cue.get("start", 0))
+            end = float(cue.get("end", start))
+            rendered_duration = float(cue.get("duration", 0))
+            window = max(0.0, end - start)
+            if start < previous_end - 0.001:
+                issues.append({
+                    "severity": "error",
+                    "message": f"Overlapping voiceover cues ({lang})",
+                })
+            if rendered_duration > window + 0.25:
+                issues.append({
+                    "severity": "error",
+                    "message": (
+                        f"Voiceover cue {cue.get('cue_id', '?')} exceeds its "
+                        f"window ({lang}): {rendered_duration:.2f}s > {window:.2f}s"
+                    ),
+                })
+            if float(cue.get("speed", 1.0)) > 1.2:
+                issues.append({
+                    "severity": "error",
+                    "message": f"Voiceover speed correction exceeds 1.20x ({lang})",
+                })
+            previous_end = end
+
+        separation = lang_data.get("separation", {})
+        if separation.get("fallback_used"):
+            issues.append({
+                "severity": "warning",
+                "message": (
+                    f"Speech separation fallback used ({lang}): "
+                    f"{separation.get('warning', 'speech-aware ducking')}"
+                ),
+            })
+        if lang_data.get("tts_fallback_used"):
+            issues.append({
+                "severity": "info",
+                "message": f"Edge TTS fallback used for one or more cues ({lang})",
+            })
 
         video_path = lang_data.get("video_path")
         if not video_path or not os.path.exists(video_path):

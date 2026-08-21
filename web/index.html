@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OPC AI Video Studio — Control Panel</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
+</head>
+<body>
+
+<!-- ══════════════════════ Demo mode banner ══════════════════════ -->
+<div id="demo-banner" class="demo-banner hidden">
+  <span class="dot"></span>
+  <strong>Demo Mode</strong>
+  <span>— no backend detected. Showing a simulated run so you can preview the flow. Start the server with <code>python scripts/start_web.py</code> for the real pipeline.</span>
+</div>
+
+<!-- ══════════════════════ Header ══════════════════════ -->
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">🎬</div>
+    <div>
+      <h1>OPC AI Video Studio</h1>
+      <p>One Human + Multiple AI Agents = One-Person Studio</p>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <span id="api-badge" class="badge badge-pending">connecting…</span>
+    <nav class="stepper" id="stepper">
+      <button class="step active" data-view="setup"><span>1</span>Setup</button>
+      <button class="step" data-view="progress" disabled><span>2</span>Run</button>
+      <button class="step" data-view="review" disabled><span>3</span>Review</button>
+      <button class="step" data-view="gallery" disabled><span>4</span>Gallery</button>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+  <!-- ══════════════════════ VIEW 1 · SETUP ══════════════════════ -->
+  <section id="view-setup" class="view">
+    <div class="grid setup-grid">
+
+      <!-- Source video -->
+      <div class="card video-card">
+        <div class="card-head"><h2>1 · Source video</h2><span class="hint"></span></div>
+
+        <div id="dropzone" class="dropzone">
+          <input type="file" id="file-input" accept="video/*" hidden>
+          <div class="dz-icon">⤴</div>
+          <p><strong>Drop a video here</strong> or <a id="dz-browse" href="#">browse</a></p>
+          <p class="dz-sub">mp4 · mov · mkv · webm — saved to <code>input/</code></p>
+        </div>
+
+        <div class="video-list-head"><span>Available videos</span><span id="video-count"></span></div>
+        <div id="video-list" class="video-list"><div class="muted">Loading…</div></div>
+
+        <div id="selected-video" class="selected-video hidden">
+          <div class="sv-name">🎞 <span id="sv-name"></span></div>
+          <div class="sv-meta"><span id="sv-size"></span><span id="sv-time"></span></div>
+        </div>
+      </div>
+
+      <!-- Options -->
+      <div class="stack">
+
+        <!-- Subtitles -->
+        <div class="card">
+          <div class="card-head"><h2>2 · Subtitles</h2><span class="hint">target languages</span></div>
+
+          <label class="field-label">Deliver as</label>
+          <div class="seg" id="subtitle-mode">
+            <button type="button" class="seg-btn active" data-mode="separate">Separate files</button>
+            <button type="button" class="seg-btn" data-mode="burn">Burned into video</button>
+            <button type="button" class="seg-btn" data-mode="both">Both</button>
+          </div>
+          <div id="burn-row" class="burn-row hidden">
+            <p class="micro-hint">Best-effort render via ffmpeg → <code>output/burned/</code>. Every selected subtitle language gets its own burned copy.</p>
+          </div>
+
+          <label class="field-label">Languages</label>
+          <div id="sub-langs" class="chips"></div>
+
+          <div id="sub-fmts-row">
+            <label class="field-label">File formats</label>
+            <div class="check-row">
+              <label class="check"><input type="checkbox" id="sub-fmt-srt" checked><span>.srt</span></label>
+              <label class="check"><input type="checkbox" id="sub-fmt-vtt" checked><span>.vtt</span></label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Audio -->
+        <div class="card">
+          <div class="card-head"><h2>3 · Audio voiceover</h2><span class="hint">AI dubbing</span></div>
+          <label class="field-label">Translate audio into</label>
+          <div id="audio-langs" class="chips"></div>
+          <label class="field-label">TTS engine</label>
+          <select id="tts-engine" class="input"></select>
+          <p class="micro-hint">Gemini is primary; Edge TTS is used automatically and visibly if a cue fails.</p>
+        </div>
+
+        <!-- Formats -->
+        <div class="card">
+          <div class="card-head"><h2>4 · Output formats</h2><span class="hint">platform targets</span></div>
+          <div id="format-options" class="fmt-groups"></div>
+          <p class="micro-hint">Platforms sharing the same aspect ratio are rendered <strong>once</strong> and reused.</p>
+        </div>
+
+        <!-- Advanced -->
+        <div class="card">
+          <button type="button" class="card-head card-head-btn" id="advanced-toggle">
+            <h2>⚙ Advanced options</h2><span class="chevron">▾</span>
+          </button>
+          <div id="advanced-body" class="advanced-body hidden">
+            <div class="form-grid">
+              <div class="field">
+                <label class="field-label">Whisper model</label>
+                <select id="adv-whisper" class="input"></select>
+                <p class="micro-hint">bigger = slower but more accurate</p>
+              </div>
+              <div class="field">
+                <label class="field-label">Target clips</label>
+                <input id="adv-max-clips" type="number" min="1" max="20" class="input">
+              </div>
+              <div class="field">
+                <label class="field-label">Min clip (s)</label>
+                <input id="adv-min-dur" type="number" min="5" max="120" class="input">
+              </div>
+              <div class="field">
+                <label class="field-label">Max clip (s)</label>
+                <input id="adv-max-dur" type="number" min="10" max="300" class="input">
+              </div>
+              <div class="field">
+                <label class="field-label">Detection strategy</label>
+                <select id="adv-strategy" class="input"></select>
+              </div>
+              <div class="field">
+                <label class="field-label">Source language</label>
+                <select id="adv-source-lang" class="input"><option value="">Auto-detect</option></select>
+              </div>
+              <div class="field">
+                <label class="field-label">Padding before (s)</label>
+                <input id="adv-pad-before" type="number" step="0.1" min="0" max="10" class="input">
+              </div>
+              <div class="field">
+                <label class="field-label">Padding after (s)</label>
+                <input id="adv-pad-after" type="number" step="0.1" min="0" max="10" class="input">
+              </div>
+              <div class="field">
+                <label class="field-label">Original audio volume</label>
+                <input id="adv-orig-vol" type="number" step="0.05" min="0" max="1" class="input">
+              </div>
+              <div class="field">
+                <label class="field-label">Voiceover volume</label>
+                <input id="adv-vo-vol" type="number" step="0.05" min="0" max="1" class="input">
+              </div>
+              <div class="field">
+                <label class="field-label">TTS speed</label>
+                <input id="adv-tts-speed" type="number" step="0.05" min="0.5" max="2" class="input">
+              </div>
+              <div class="field">
+                <label class="field-label">Caption tone</label>
+                <select id="adv-tone" class="input"></select>
+              </div>
+            </div>
+            <div class="check-grid">
+              <label class="check"><input type="checkbox" id="adv-snap"><span>Snap cuts to silence</span></label>
+              <label class="check"><input type="checkbox" id="adv-thumb"><span>Generate thumbnails</span></label>
+              <label class="check"><input type="checkbox" id="adv-check-av"><span>Quality: A/V sync</span></label>
+              <label class="check"><input type="checkbox" id="adv-check-sub"><span>Quality: subtitle sync</span></label>
+              <label class="check"><input type="checkbox" id="adv-check-sil"><span>Quality: silence gaps</span></label>
+            </div>
+            <label class="switch-option">
+              <input type="checkbox" id="adv-gemini-required" checked>
+              <span class="switch-track" aria-hidden="true"><span></span></span>
+              <span class="switch-copy">
+                <strong>Require Gemini API</strong>
+                <small>Require Gemini analysis, clip review, subtitle planning, and dubbing planning; stop with an explicit error if an expert fails.</small>
+              </span>
+            </label>
+            <label class="field-label">Agents to run</label>
+            <div id="adv-stages" class="check-grid"></div>
+          </div>
+        </div>
+
+        <!-- Run -->
+        <div class="run-bar">
+          <div>
+            <div class="run-summary" id="run-summary">Select a video and options to start.</div>
+            <div class="run-error" id="run-error"></div>
+          </div>
+          <button id="run-btn" class="btn btn-primary" disabled>▶ Run Studio</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════════════════ VIEW 2 · PROGRESS ══════════════════════ -->
+  <section id="view-progress" class="view hidden">
+    <div class="card">
+      <div class="card-head">
+        <h2>Pipeline running</h2>
+        <div class="run-meta">
+          <span id="progress-video" class="chip"></span>
+          <span id="progress-timer" class="chip chip-accent">0:00</span>
+        </div>
+      </div>
+      <div id="progress-error" class="pipeline-error hidden" role="alert"></div>
+      <div id="stage-rail" class="stage-rail"></div>
+      <div class="progress-log-head"><span>Live log</span><button id="log-clear" class="btn btn-ghost btn-sm">clear</button></div>
+      <div id="log-console" class="log-console"><div class="muted">Waiting for pipeline…</div></div>
+    </div>
+  </section>
+
+  <!-- ══════════════════════ VIEW 3 · REVIEW ══════════════════════ -->
+  <section id="view-review" class="view hidden">
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2 id="review-title">3 · Approve clips before processing</h2>
+          <p id="review-subtitle" class="sub">Only approved clips continue to subtitles, voiceover, thumbnails, captions, and formatting.</p>
+        </div>
+        <div id="clip-review-actions" class="review-actions">
+          <button id="review-approve-all" class="btn btn-ghost">Approve all</button>
+          <button id="review-drop-all" class="btn btn-ghost">Drop all</button>
+          <button id="review-next" class="btn btn-primary" disabled>Review every clip to continue</button>
+        </div>
+      </div>
+      <div id="review-grid" class="review-grid"><div class="muted">Loading…</div></div>
+      <div id="localization-review-panel" class="localization-review hidden">
+        <div id="localization-review-grid" class="localization-review-grid"><div class="muted">Loading localization plans…</div></div>
+        <div class="localization-actions">
+          <button id="localization-approve-all" class="btn btn-ghost">Approve all languages</button>
+          <button id="localization-next" class="btn btn-primary">Render approved voiceover →</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════════════════ VIEW 4 · GALLERY ══════════════════════ -->
+  <section id="view-gallery" class="view hidden">
+    <div class="card">
+      <div class="card-head">
+        <div><h2>4 · Gallery &amp; export</h2><p class="sub" id="gallery-subtitle"></p></div>
+        <button id="new-run-btn" class="btn btn-ghost">↺ New run</button>
+      </div>
+      <div id="metrics-strip" class="metrics-strip"></div>
+    </div>
+
+    <div class="card" id="quality-card">
+      <div class="card-head"><h2>Quality report</h2><span id="quality-badge" class="badge badge-pending">—</span></div>
+      <div id="quality-body" class="quality-body"></div>
+    </div>
+
+    <div id="gallery-grid" class="gallery-grid"></div>
+  </section>
+
+</main>
+
+<footer class="foot">
+  <span>OPC AI Video Studio</code></span> <br>
+  <span>Created By: Alexander Liew - Thaedeus Tho - Randy Kwok - Lee Ho Yun - Lee Jae Won - Wen Xing</code></span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

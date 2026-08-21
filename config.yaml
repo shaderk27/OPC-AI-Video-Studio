@@ -15,6 +15,8 @@ project:
 # Paths
 # ─────────────────────────────────────────────────────────────────────────────
 paths:
+  # Each processing run creates YYYY-MM-DD/HH-MM-SS_video-name_run-id
+  # beneath this archive root. The remaining paths are runtime defaults.
   input_dir: "input"
   output_dir: "output"
   clips_dir: "output/clips"
@@ -39,6 +41,23 @@ content_analyzer:
   summary_sentences: 3
   # Save the full analysis report as content_analysis.json
   save_report: true
+  # Gemini analyzes timestamped transcript text only; the full video is not
+  # uploaded. Its semantic output replaces shallow topics/chapters/key moments.
+  gemini_analysis:
+    enabled: true
+    required: true
+    model: "gemini-3.5-flash-lite"
+    timeout_seconds: 120
+    # Retry transient TLS resets, connection failures, timeouts, and retryable
+    # HTTP responses. The total includes the original request.
+    retry_attempts: 3
+    # Backward-compatible transport-only retry knob (retries excluding initial request).
+    transport_retries: 2
+    # Fail quickly before full-video transcription if Gemini is unreachable.
+    preflight_timeout_seconds: 10
+    chunk_max_chars: 50000
+    max_topics: 8
+    max_key_moments: 12
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Clip Expert Agent Settings
@@ -49,8 +68,10 @@ clip_agent:
   # Minimum and maximum clip duration in seconds
   min_clip_duration: 15
   max_clip_duration: 60
-  # Number of highlight clips to extract
+  # Target number of highlight clips to extract. The studio may return fewer
+  # only when not enough candidates meet the minimum visual quality floor.
   max_clips: 5
+  min_clips: 3
   # Highlight detection strategy:
   #   "transcript"  - Analyze transcript for key moments (keyword density, sentiment shifts, topic changes)
   #   "audio_energy" - Detect high-energy moments in audio (cheers, laughter, applause)
@@ -72,6 +93,45 @@ clip_agent:
   # Add padding (seconds) before and after detected highlights
   padding_before: 1.5
   padding_after: 1.0
+  # Reserve time after a detected moment for its payoff and reaction
+  # (for example: penalty buildup -> shot -> result/celebration)
+  completion_padding_after: 6.0
+  # Finish a nearby transcript sentence, but do not follow an unusually long
+  # Whisper segment far beyond the protected payoff window
+  transcript_boundary_max_extension: 2.0
+  # Maximum score bonus when emotional language overlaps a strong audio peak
+  emotion_audio_fusion_bonus: 15.0
+  # Final selection balances content relevance with engagement potential
+  topic_relevance_weight: 0.55
+  hook_score_weight: 0.45
+  topic_relevance_threshold: 60.0
+  # Gemini reviews transcript/metadata candidates, then visually inspects
+  # lightweight temporary video proxies before the final clips are cut.
+  # If GEMINI_API_KEY is missing or a request fails, heuristic ranking is kept
+  # unless `required` is true.
+  gemini_review:
+    enabled: true
+    # When true, any missing key, SDK problem, timeout, API error, or invalid
+    # response fails the Clip stage and the entire run instead of falling back.
+    required: true
+    model: "gemini-3.5-flash-lite"
+    candidate_limit: 12
+    blend_weight: 0.5
+    timeout_seconds: 45
+    retry_attempts: 3
+    context_seconds: 5.0
+    max_transcript_chars: 2400
+    # Reject loud-only/weak candidates and refine start/end timestamps using
+    # extra visual context around each proposed clip.
+    video_review_enabled: true
+    video_candidate_limit: 10
+    video_context_seconds: 4.0
+    video_min_score: 60
+    # Borderline candidates above this score may fill empty target slots even
+    # when Gemini's boolean accept decision varies between otherwise similar runs.
+    video_backfill_min_score: 45
+    video_blend_weight: 0.8
+    video_processing_timeout_seconds: 180
   # Ensure clips start/end at silence boundaries for clean cuts
   snap_to_silence: true
 
@@ -86,7 +146,28 @@ subtitle_agent:
   # small = better accuracy          (~2GB RAM)
   # medium = high accuracy           (~5GB RAM)
   # large-v3 = best accuracy         (~10GB RAM)
+  # Base remains the offline timing model. Gemini Pro listens to each approved
+  # clip and corrects its wording before subtitle localization.
   whisper_model: "base"
+  gemini:
+    enabled: true
+    required: true
+    model: "gemini-3.5-flash-lite"
+    prompt_version: "subtitle-v2-context-correction"
+    timeout_seconds: 60
+    transport_retries: 2
+  # Higher-accuracy multimodal pass used only for the canonical source
+  # transcript; translations continue using the faster model above.
+  source_correction_model: "gemini-3.1-pro-preview"
+  # Accuracy controls shared by Content Analyzer, Clip Expert and subtitles.
+  beam_size: 5
+  vad_filter: true
+  vad_min_silence_ms: 300
+  # Names, teams, places or specialist terms Whisper should expect.
+  # Example: ["Lionel Messi", "Ángel Di María", "Argentina", "France"]
+  vocabulary_hints: []
+  # If this model cannot be downloaded, a complete locally cached base model is
+  # used automatically so the pipeline can continue.
   # Model downloads: huggingface.co is unreachable from mainland China, so the
   # studio automatically downloads via hf-mirror.com and caches the model under
   # models/whisper/. To override, set the HF_ENDPOINT environment variable,
@@ -106,25 +187,42 @@ subtitle_agent:
   max_chars_per_line: 42
   # Maximum duration per subtitle (seconds)
   max_subtitle_duration: 7.0
+  # Adjacent tiny Whisper fragments are merged to keep subtitles readable and
+  # give TTS enough room without changing the outer speech timestamps.
+  min_subtitle_duration: 1.5
+  max_subtitle_merge_gap: 0.35
+  max_reading_chars_per_second: 24.0
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Audio Expert Agent Settings
 # Translates audio into target languages using TTS
 # ─────────────────────────────────────────────────────────────────────────────
 audio_agent:
-  # TTS engine: "edge" (Microsoft Edge TTS — free, no key, works in mainland China)
-  #             "gtts" (Google TTS — blocked on many CN networks)
-  tts_engine: "edge"
+  gemini:
+    enabled: true
+    required: true
+    model: "gemini-3.5-flash-lite"
+    prompt_version: "audio-v1"
+    timeout_seconds: 60
+    transport_retries: 2
   # Target languages for audio translation (ISO 639-1 codes)
   target_languages:
     - "en"
     - "zh"
-  # Volume of original audio when mixing (0.0 = muted, 1.0 = full)
-  original_audio_volume: 0.15
-  # Volume of translated voiceover
+  tts:
+    model: "gemini-3.1-flash-tts-preview"
+    voice: "Kore"
+    edge_fallback: true
+  separation:
+    enabled: true
+    executable: "models/audio-separator/.venv/Scripts/audio-separator.exe"
+    model: "UVR_MDXNET_KARA_2.onnx"
+    model_dir: "models/audio-separator"
+  background_volume: 0.9
+  # Used only by the clearly recorded speech-aware-ducking fallback.
+  original_audio_volume: 0.45
   voiceover_volume: 1.0
-  # Speed adjustment for TTS (1.0 = normal, 0.9 = slower, 1.1 = faster)
-  tts_speed: 1.0
+  max_tts_speed: 1.2
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Enhancement: Thumbnail Agent
@@ -159,6 +257,12 @@ social_media_agent:
     - name: "X (Twitter)"
       max_caption_length: 280
       hashtag_count: 3
+    - name: "Douyin"
+      max_caption_length: 150
+      hashtag_count: 5
+    - name: "Xiaohongshu"
+      max_caption_length: 1000
+      hashtag_count: 8
   # Tone: casual, professional, energetic, educational
   tone: "energetic"
 
@@ -228,3 +332,25 @@ orchestrator:
     - "quality"       # Review quality
   # Verbose logging
   verbose: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Manager Agent Settings (Member 1 — System Architect)
+# Supervisory orchestrator with retry logic + human-in-the-loop review gate
+# ─────────────────────────────────────────────────────────────────────────────
+manager_agent:
+  # Maximum retry attempts per stage (0 = no retry, 1 = retry once)
+  max_retries: 1
+  # Timeout per stage in seconds (aborts if exceeded)
+  stage_timeout: 300
+  # Pause after Clip stage for human review of generated clips
+  review_gate_enabled: true
+  # Subtitle and dubbing plans are approved automatically; no localization pause.
+  localization_review_enabled: false
+  # Seconds before auto-approval. 0 means wait for an explicit human decision.
+  review_gate_timeout: 0
+  # Core stages — failure here stops the entire pipeline
+  core_stages:
+    - "content_analysis"
+    - "clip"
+    - "subtitle"
+    - "audio"
