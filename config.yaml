@@ -146,16 +146,19 @@ subtitle_agent:
   # small = better accuracy          (~2GB RAM)
   # medium = high accuracy           (~5GB RAM)
   # large-v3 = best accuracy         (~10GB RAM)
-  # Use the complete local base model for deterministic offline demos. Switch
-  # to small only after scripts/setup_whisper_model.py completes successfully.
+  # Base remains the offline timing model. Gemini Pro listens to each approved
+  # clip and corrects its wording before subtitle localization.
   whisper_model: "base"
   gemini:
     enabled: true
     required: true
     model: "gemini-3.5-flash-lite"
-    prompt_version: "subtitle-v1"
+    prompt_version: "subtitle-v2-context-correction"
     timeout_seconds: 60
     transport_retries: 2
+  # Higher-accuracy multimodal pass used only for the canonical source
+  # transcript; translations continue using the faster model above.
+  source_correction_model: "gemini-3.1-pro-preview"
   # Accuracy controls shared by Content Analyzer, Clip Expert and subtitles.
   beam_size: 5
   vad_filter: true

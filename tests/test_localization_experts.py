@@ -1,5 +1,6 @@
 import json
 import base64
+import re
 import tempfile
 import unittest
 import wave
@@ -40,9 +41,29 @@ class _Models:
         return _Response(self.responses.pop(0))
 
 
+class _Files:
+    def __init__(self):
+        self.uploaded = []
+        self.deleted = []
+
+    def upload(self, *, file):
+        uploaded = SimpleNamespace(
+            name=f"files/{Path(file).name}", state=SimpleNamespace(name="ACTIVE")
+        )
+        self.uploaded.append(str(file))
+        return uploaded
+
+    def get(self, *, name):
+        return SimpleNamespace(name=name, state=SimpleNamespace(name="ACTIVE"))
+
+    def delete(self, *, name):
+        self.deleted.append(name)
+
+
 class _Client:
     def __init__(self, responses=()):
         self.models = _Models(responses)
+        self.files = _Files()
 
 
 def _config(root, section):
@@ -157,6 +178,146 @@ class GeminiFoundationTests(unittest.TestCase):
 
 
 class SubtitleExpertTests(unittest.TestCase):
+    def test_line_breaks_are_wrapped_locally_without_failing_valid_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = SubtitleAgent(_config(tmp, "subtitle_agent"), _Client())
+            text = "Di Maria is the spare man and Argentina continue their attack."
+            source = [{
+                "cue_id": "cue_0001", "start": 0.0, "end": 4.0,
+                "text": text,
+            }]
+            raw = {
+                "clip_id": "clip", "source_language": "en",
+                "target_language": "en", "summary": "football",
+                "cues": [{
+                    "cue_id": "cue_0001", "translated_text": text,
+                    "line_break_text": text, "confidence": 1.0, "warning": "",
+                }],
+            }
+            plan, errors = agent._validate_plan(raw, "clip", "en", "en", source)
+
+            self.assertEqual([], errors)
+            lines = plan["cues"][0]["line_break_text"].splitlines()
+            self.assertEqual(2, len(lines))
+            self.assertTrue(all(len(line) <= agent.max_chars for line in lines))
+
+    def test_canonical_transcript_expands_insufficient_whisper_cues(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = SubtitleAgent(_config(tmp, "subtitle_agent"), _Client())
+            source = [{
+                "cue_id": "cue_0001", "start": 0.0, "end": 14.0,
+                "text": "Short Whisper guess.",
+            }]
+            transcript = " ".join(["football commentary"] * 14)
+            expanded = agent._resegment_for_canonical_transcript(source, transcript)
+
+            self.assertGreater(len(expanded), 1)
+            self.assertEqual(0.0, expanded[0]["start"])
+            self.assertEqual(14.0, expanded[-1]["end"])
+            self.assertEqual(
+                [f"cue_{index:04d}" for index in range(1, len(expanded) + 1)],
+                [cue["cue_id"] for cue in expanded],
+            )
+            self.assertTrue(all(
+                len(re.sub(r"\s+", "", cue["text"])) <= agent.max_chars * 2
+                for cue in expanded
+            ))
+
+    def test_context_corrects_source_before_other_languages_translate(self):
+        canonical = {
+            "language": "en",
+            "transcript": "Di Maria is the spare man.",
+            "uncertain_phrases": [],
+        }
+        source_plan = {
+            "clip_id": "clip", "source_language": "en",
+            "target_language": "en", "summary": "Football attack",
+            "cues": [{
+                "cue_id": "cue_0001",
+                "translated_text": "Di Maria is the spare man.",
+                "line_break_text": "Di Maria is the spare man.",
+                "confidence": 0.95, "warning": "",
+            }],
+        }
+        chinese_plan = {
+            "clip_id": "clip", "source_language": "en",
+            "target_language": "zh", "summary": "足球进攻",
+            "cues": [{
+                "cue_id": "cue_0001", "translated_text": "迪马利亚无人盯防。",
+                "line_break_text": "迪马利亚无人盯防。",
+                "confidence": 0.95, "warning": "",
+            }],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _config(tmp, "subtitle_agent")
+            cfg["subtitle_agent"]["target_languages"] = ["zh"]
+            client = _Client([canonical, chinese_plan])
+            agent = SubtitleAgent(cfg, client)
+            clip = {
+                "path": str(Path(tmp) / "clip.mp4"), "filename": "clip.mp4",
+                "start": 100.0, "end": 104.0, "duration": 4.0,
+            }
+            analysis = {
+                "content_type": "sports commentary",
+                "summary": "Argentina attacks through Di Maria.",
+                "topics": [{"term": "Angel Di Maria"}],
+                "entities": [{"name": "Angel Di Maria", "type": "athlete"}],
+                "corrected_terms": [{"heard": "Dima Rier", "corrected": "Di Maria"}],
+            }
+            def write_audio(_source, output):
+                Path(output).parent.mkdir(parents=True, exist_ok=True)
+                Path(output).write_bytes(b"audio")
+                return output
+
+            with patch(
+                "agents.subtitle_agent.extract_audio", side_effect=write_audio
+            ), patch(
+                "agents.subtitle_agent.transcribe_audio",
+                return_value=[{
+                    "start": 0.0, "end": 4.0,
+                    "text": "Dima Rier is the passman.",
+                }],
+            ) as transcribe:
+                agent.create_plans({
+                    "clips": [clip], "content_analysis": analysis,
+                    "full_transcript": [{
+                        "start": 100.0, "end": 104.0,
+                        "text": "Dima Rier is the spare man.",
+                    }],
+                })
+
+            self.assertIn(
+                "Di Maria", transcribe.call_args.kwargs["vocabulary_hints"]
+            )
+            source_contents = client.models.calls[0]["contents"]
+            self.assertIsInstance(source_contents, list)
+            self.assertEqual(
+                "gemini-3.1-pro-preview", client.models.calls[0]["model"]
+            )
+            correction_request = json.loads(source_contents[0])
+            self.assertIn(
+                "Angel Di Maria", correction_request["known_names_and_terms"]
+            )
+            translation_request = json.loads(client.models.calls[1]["contents"])
+            self.assertEqual(
+                canonical["transcript"],
+                translation_request["content_context"]["authoritative_audio_transcript"],
+            )
+            self.assertEqual(
+                "Dima Rier is the spare man.",
+                translation_request["content_context"]["nearby_transcript"][0]["text"],
+            )
+            self.assertEqual(
+                "Di Maria is the spare man.",
+                translation_request["cues"][0]["source_text"],
+            )
+            self.assertEqual(
+                "Di Maria is the spare man.",
+                translation_request["cues"][0]["raw_asr_text"],
+            )
+            self.assertEqual(1, len(client.files.uploaded))
+            self.assertEqual(1, len(client.files.deleted))
+
     def test_low_vad_coverage_retranscribes_and_keeps_later_speech(self):
         response = {
             "clip_id": "clip",

@@ -74,6 +74,8 @@ class GeminiAgentClient:
         language: str,
         request_kind: str = "plan",
         repair_attempt: int = 0,
+        media_path: Optional[str] = None,
+        model_override: Optional[str] = None,
     ) -> tuple[Dict[str, Any], str]:
         if not self.available:
             raise GeminiAgentError(
@@ -81,12 +83,19 @@ class GeminiAgentClient:
             )
 
         serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        input_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        hash_input = serialized.encode("utf-8")
+        if media_path:
+            media = Path(media_path)
+            if not media.is_file():
+                raise GeminiAgentError(f"Gemini media file not found: {media}")
+            hash_input += media.read_bytes()
+        input_hash = hashlib.sha256(hash_input).hexdigest()
+        request_model = str(model_override or self.model)
         started = time.monotonic()
         trace: Dict[str, Any] = {
             "agent_id": self.agent_id,
             "role": self.role,
-            "model": self.model,
+            "model": request_model,
             "prompt_version": self.prompt_version,
             "request_kind": request_kind,
             "clip_id": clip_id,
@@ -96,6 +105,22 @@ class GeminiAgentClient:
             "started_at": datetime.now().astimezone().isoformat(),
             "status": "started",
         }
+        uploaded = None
+        contents: Any = serialized
+        if media_path:
+            try:
+                client = self._get_client()
+                uploaded = client.files.upload(file=media_path)
+                uploaded = self._wait_until_active(client, uploaded)
+                contents = [serialized, uploaded]
+                trace["media"] = {
+                    "filename": Path(media_path).name,
+                    "sha256_included_in_input_hash": True,
+                }
+            except Exception as exc:
+                raise GeminiAgentError(
+                    f"Could not upload subtitle audio to Gemini: {exc}"
+                ) from exc
 
         trace["transport_attempts"] = []
         max_attempts = self.transport_retries + 1
@@ -104,8 +129,8 @@ class GeminiAgentClient:
             attempt_started = time.monotonic()
             try:
                 response = self._get_client().models.generate_content(
-                    model=self.model,
-                    contents=serialized,
+                    model=request_model,
+                    contents=contents,
                     config={
                         "system_instruction": self.system_instruction,
                         "response_mime_type": "application/json",
@@ -141,6 +166,7 @@ class GeminiAgentClient:
                         if getattr(usage, name, None) is not None
                     }
                 trace_path = self._write_trace(trace)
+                self._delete_uploaded(uploaded)
                 return parsed, trace_path
             except Exception as exc:
                 last_error = exc
@@ -164,9 +190,34 @@ class GeminiAgentClient:
             "latency_seconds": round(time.monotonic() - started, 3),
         })
         self._write_trace(trace)
+        self._delete_uploaded(uploaded)
         if wrapped is last_error:
             raise wrapped
         raise wrapped from last_error
+
+    def _wait_until_active(self, client: Any, uploaded: Any) -> Any:
+        deadline = time.monotonic() + (self.timeout_ms / 1000)
+        current = uploaded
+        while True:
+            state = getattr(current, "state", None)
+            state_name = getattr(state, "name", str(state or "")).upper()
+            if state_name in ("", "ACTIVE") or state_name.endswith("ACTIVE"):
+                return current
+            if state_name == "FAILED" or state_name.endswith("FAILED"):
+                raise GeminiAgentError("Gemini could not process subtitle audio")
+            if time.monotonic() >= deadline:
+                raise GeminiAgentError("Gemini subtitle audio processing timed out")
+            time.sleep(1)
+            current = client.files.get(name=current.name)
+
+    def _delete_uploaded(self, uploaded: Any) -> None:
+        name = getattr(uploaded, "name", "") if uploaded is not None else ""
+        if not name:
+            return
+        try:
+            self._get_client().files.delete(name=name)
+        except Exception:
+            pass
 
     def _get_client(self):
         if self._client is not None:

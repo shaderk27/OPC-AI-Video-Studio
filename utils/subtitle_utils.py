@@ -8,6 +8,7 @@ Uses faster-whisper for speech-to-text and deep-translator for translation.
 import os
 import re
 import sys
+import time
 import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -100,22 +101,35 @@ def _download_whisper_model_direct(model_size: str) -> Path:
             continue
         partial = destination / f"{filename}.part"
         url = f"{HF_MIRROR}/{repo}/resolve/main/{filename}?download=true"
-        try:
-            with requests.get(
-                url, stream=True, timeout=(15, 180), allow_redirects=True
-            ) as response:
-                response.raise_for_status()
-                with partial.open("wb") as output:
-                    for chunk in response.iter_content(chunk_size=1024 * 1024):
-                        if chunk:
-                            output.write(chunk)
-            partial.replace(target)
-        except Exception:
+        last_error = None
+        for attempt in range(1, 7):
+            offset = partial.stat().st_size if partial.is_file() else 0
+            headers = {"Range": f"bytes={offset}-"} if offset else {}
             try:
-                partial.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise
+                with requests.get(
+                    url, stream=True, timeout=(15, 180),
+                    allow_redirects=True, headers=headers,
+                ) as response:
+                    response.raise_for_status()
+                    resumed = offset > 0 and response.status_code == 206
+                    mode = "ab" if resumed else "wb"
+                    with partial.open(mode) as output:
+                        for chunk in response.iter_content(
+                            chunk_size=1024 * 1024
+                        ):
+                            if chunk:
+                                output.write(chunk)
+                partial.replace(target)
+                last_error = None
+                break
+            except Exception as exc:
+                # Keep the .part file. The next request resumes from its
+                # current byte count instead of restarting a large model.
+                last_error = exc
+                if attempt < 6:
+                    time.sleep(min(8, attempt * 2))
+        if last_error is not None:
+            raise last_error
     return destination
 
 

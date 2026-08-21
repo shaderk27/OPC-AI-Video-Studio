@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import re
+import math
+import textwrap
 import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -50,13 +52,39 @@ SUBTITLE_PLAN_SCHEMA = {
     ],
 }
 
+CANONICAL_TRANSCRIPT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "language": {"type": "string"},
+        "transcript": {"type": "string"},
+        "uncertain_phrases": {
+            "type": "array", "items": {"type": "string"},
+        },
+    },
+    "required": ["language", "transcript", "uncertain_phrases"],
+}
+
 
 SUBTITLE_SYSTEM_INSTRUCTION = """
 You are the Subtitle Localization Expert. Produce accurate, concise subtitles
 that preserve meaning, names, numbers, scores, terminology, and emotional tone.
-Respect every supplied cue ID and timing window. Never invent facts, omit cues,
-or alter cue IDs. line_break_text may contain at most one newline. Return only
-the requested JSON schema and no commentary.
+The supplied cue text is noisy automatic speech recognition, not authoritative
+wording. Correct obvious recognition errors using the nearby transcript,
+content summary, named entities, and terminology corrections. For a
+same-language request, return a faithful corrected transcript rather than a
+paraphrase. For translation, translate the corrected canonical source cues.
+Never add speech unsupported by the audio/context. Respect every supplied cue
+ID and timing window; never omit or alter cue IDs. line_break_text may contain
+at most one newline. Return only the requested JSON schema and no commentary.
+""".strip()
+
+SOURCE_CORRECTION_SYSTEM_INSTRUCTION = """
+You are the Source Transcript Correction Expert. Listen to the attached audio
+and transcribe every spoken word verbatim, in order, in its original language.
+Audio is authoritative. Do not paraphrase, summarize, translate, simplify
+poetic wordplay, or copy phonetic guesses from other transcripts. Use supplied
+names and context only to resolve spelling. Put genuinely unclear wording in
+uncertain_phrases. Return only the requested JSON schema.
 """.strip()
 
 
@@ -78,6 +106,9 @@ class SubtitleAgent(BaseAgent):
             "vad_min_silence_ms", 300
         )
         self.whisper_vocabulary_hints = self.sub_config.get("vocabulary_hints", [])
+        self.source_correction_model = self.sub_config.get(
+            "source_correction_model", "gemini-3.1-pro-preview"
+        )
         self.source_language = self.sub_config.get("source_language")
         self.target_languages = list(self.sub_config.get("target_languages", ["en"]))
         self.formats = self.sub_config.get("formats", ["srt", "vtt"])
@@ -95,6 +126,15 @@ class SubtitleAgent(BaseAgent):
             role="Subtitle Localization Expert",
             system_instruction=SUBTITLE_SYSTEM_INSTRUCTION,
             schema=SUBTITLE_PLAN_SCHEMA,
+            client=gemini_client,
+        )
+        self.source_corrector = GeminiAgentClient(
+            config=config,
+            section="subtitle_agent",
+            agent_id="subtitle_source_corrector",
+            role="Source Transcript Correction Expert",
+            system_instruction=SOURCE_CORRECTION_SYSTEM_INSTRUCTION,
+            schema=CANONICAL_TRANSCRIPT_SCHEMA,
             client=gemini_client,
         )
 
@@ -116,8 +156,13 @@ class SubtitleAgent(BaseAgent):
         clips = input_data.get("clips", [])
         subtitles_dir = self.paths.get("subtitles_dir", "output/subtitles")
         self.ensure_dir(subtitles_dir)
-        topics = input_data.get("content_analysis", {}).get("topics", [])
+        analysis = input_data.get("content_analysis", {})
+        topics = analysis.get("topics", [])
         full_transcript = input_data.get("full_transcript", [])
+        context_hints = self._context_vocabulary_hints(analysis)
+        whisper_hints = list(dict.fromkeys([
+            *self.whisper_vocabulary_hints, *context_hints,
+        ]))
 
         for index, clip in enumerate(clips):
             clip_path = clip["path"]
@@ -133,7 +178,7 @@ class SubtitleAgent(BaseAgent):
                     beam_size=self.whisper_beam_size,
                     vad_filter=self.whisper_vad_filter,
                     vad_min_silence_ms=self.whisper_vad_min_silence_ms,
-                    vocabulary_hints=self.whisper_vocabulary_hints,
+                    vocabulary_hints=whisper_hints,
                 )
                 duration = self._clip_duration(clip)
                 evidence_end = self._source_transcript_evidence_end(
@@ -153,7 +198,7 @@ class SubtitleAgent(BaseAgent):
                         beam_size=self.whisper_beam_size,
                         vad_filter=False,
                         vad_min_silence_ms=self.whisper_vad_min_silence_ms,
-                        vocabulary_hints=self.whisper_vocabulary_hints,
+                        vocabulary_hints=whisper_hints,
                     )
                     if self._recovery_is_better(segments, recovered, evidence_end):
                         segments = recovered
@@ -186,20 +231,91 @@ class SubtitleAgent(BaseAgent):
             }
             plans: Dict[str, Dict[str, Any]] = {}
             languages = list(dict.fromkeys([detected, *self.target_languages]))
+            nearby_transcript = self._nearby_transcript(clip, full_transcript)
+            canonical_source_cues = None
+            authoritative_transcript = ""
+            source_correction_trace = None
+
+            correction_audio = os.path.join(
+                subtitles_dir, f"{clip_name}_gemini_source.wav"
+            )
+            extract_audio(clip_path, correction_audio)
+            try:
+                if os.path.isfile(correction_audio):
+                    corrected, source_correction_trace = self.source_corrector.generate(
+                        {
+                            "request": "Transcribe the attached clip word for word.",
+                            "source_language": detected,
+                            "known_names_and_terms": context_hints,
+                            "content_type": analysis.get("content_type", ""),
+                            "content_summary": analysis.get("summary", ""),
+                            "preserve_commentator_wordplay": True,
+                        },
+                        clip_id=clip_name,
+                        language=detected,
+                        request_kind="source_correction",
+                        media_path=correction_audio,
+                        model_override=self.source_correction_model,
+                    )
+                    authoritative_transcript = str(
+                        corrected.get("transcript", "")
+                    ).strip()
+            finally:
+                try:
+                    os.remove(correction_audio)
+                except OSError:
+                    pass
+
+            prepared = self._resegment_for_canonical_transcript(
+                prepared, authoritative_transcript
+            )
+            clip["source_subtitle_segments"] = prepared
+            clip["subtitle_transcription"]["cue_count"] = len(prepared)
 
             for language in languages:
                 payload = self._plan_payload(
-                    clip_name, detected, language, prepared, topics
-                )
-                raw, trace_path = self.gemini.generate(
-                    payload,
                     clip_id=clip_name,
-                    language=language,
+                    source_language=detected,
+                    target_language=language,
+                    segments=prepared,
+                    analysis=analysis,
+                    nearby_transcript=nearby_transcript,
+                    canonical_source_cues=canonical_source_cues,
+                    authoritative_transcript=authoritative_transcript,
                 )
+                same_language = (
+                    language.lower().split("-", 1)[0]
+                    == detected.lower().split("-", 1)[0]
+                )
+                trace_path = None
+                if same_language and authoritative_transcript:
+                    raw = {
+                        "clip_id": clip_name,
+                        "source_language": detected,
+                        "target_language": language,
+                        "summary": analysis.get("summary", ""),
+                        "cues": [{
+                            "cue_id": cue["cue_id"],
+                            "translated_text": cue["text"],
+                            "line_break_text": self._format_line_break_text(
+                                cue["text"]
+                            ),
+                            "confidence": 1.0,
+                            "warning": "",
+                        } for cue in prepared],
+                    }
+                else:
+                    raw, trace_path = self.gemini.generate(
+                        payload,
+                        clip_id=clip_name,
+                        language=language,
+                    )
                 plan, errors = self._validate_plan(
                     raw, clip_name, detected, language, prepared
                 )
-                trace_paths = [trace_path]
+                trace_paths = [
+                    path for path in (source_correction_trace, trace_path) if path
+                ]
                 if errors:
                     repair_payload = {
                         "request": "Repair the rejected subtitle plan.",
@@ -232,6 +348,8 @@ class SubtitleAgent(BaseAgent):
                     "prompt_version": self.gemini.prompt_version,
                 })
                 plans[language] = plan
+                if language.lower() == detected.lower():
+                    canonical_source_cues = plan.get("cues", [])
 
             clip["subtitle_plans"] = plans
         return self._result(input_data, clips)
@@ -287,30 +405,116 @@ class SubtitleAgent(BaseAgent):
         source_language: str,
         target_language: str,
         segments: List[Dict[str, Any]],
-        topics: List[Any],
+        analysis: Dict[str, Any],
+        nearby_transcript: List[Dict[str, Any]],
+        canonical_source_cues: Any = None,
+        authoritative_transcript: str = "",
     ) -> Dict[str, Any]:
+        canonical_by_id = {
+            cue.get("cue_id"): cue
+            for cue in (canonical_source_cues or [])
+            if isinstance(cue, dict) and cue.get("cue_id")
+        }
+        same_language = (
+            source_language.lower().split("-", 1)[0]
+            == target_language.lower().split("-", 1)[0]
+        )
         return {
-            "request": "Create a complete subtitle localization plan.",
+            "request": (
+                "Correct the noisy ASR into a faithful source-language subtitle plan."
+                if same_language else
+                "Translate the corrected canonical source into a complete subtitle plan."
+            ),
             "clip_id": clip_id,
             "source_language": source_language,
             "target_language": target_language,
-            "topics": topics[:10],
+            "content_context": {
+                "content_type": analysis.get("content_type", ""),
+                "summary": analysis.get("summary", ""),
+                "topics": analysis.get("topics", [])[:10],
+                "named_entities": analysis.get("entities", [])[:20],
+                "terminology_corrections": analysis.get(
+                    "corrected_terms", []
+                )[:50],
+                "nearby_transcript": nearby_transcript,
+                "authoritative_audio_transcript": authoritative_transcript,
+            },
             "constraints": {
                 "max_characters_per_line": self.max_chars,
                 "maximum_lines": 2,
                 "max_reading_characters_per_second": self.max_reading_speed,
                 "timestamps_are_immutable": True,
+                "source_text_is_noisy_asr": True,
+                "attached_audio_is_authoritative": True,
+                "listen_to_the_attached_audio_before_correcting": True,
+                "preserve_every_word_from_authoritative_audio_transcript": True,
+                "distribute_authoritative_words_across_cues_without_rewriting": True,
+                "correct_names_and_obvious_misrecognitions": True,
+                "use_nearby_transcript_as_supporting_evidence": True,
+                "do_not_paraphrase_or_invent_commentary": True,
+                "same_language_must_be_corrected_transcription": True,
             },
             "cues": [
                 {
                     "cue_id": cue["cue_id"],
                     "start": cue["start"],
                     "end": cue["end"],
-                    "source_text": cue["text"],
+                    "source_text": (
+                        canonical_by_id.get(cue["cue_id"], {}).get(
+                            "translated_text"
+                        ) or cue["text"]
+                    ),
+                    "raw_asr_text": cue["text"],
                 }
                 for cue in segments
             ],
         }
+
+    def _context_vocabulary_hints(
+        self, analysis: Dict[str, Any]
+    ) -> List[str]:
+        """Extract proper nouns and corrected terms for Whisper's prompt."""
+        candidates: List[Any] = []
+        for entity in analysis.get("entities", []):
+            candidates.append(entity.get("name") if isinstance(entity, dict) else entity)
+        for correction in analysis.get("corrected_terms", []):
+            if isinstance(correction, dict):
+                candidates.append(correction.get("corrected"))
+        for topic in analysis.get("topics", []):
+            candidates.append(topic.get("term") if isinstance(topic, dict) else topic)
+
+        hints = []
+        seen = set()
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            key = text.casefold()
+            if text and key not in seen:
+                hints.append(text)
+                seen.add(key)
+        return hints
+
+    @staticmethod
+    def _nearby_transcript(
+        clip: Dict[str, Any], full_transcript: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Return full-video ASR around the clip as lexical correction evidence."""
+        clip_start = float(clip.get("start", 0) or 0)
+        duration = SubtitleAgent._clip_duration(clip)
+        clip_end = float(clip.get("end", clip_start + duration) or 0)
+        if clip_end <= clip_start:
+            clip_end = clip_start + duration
+        nearby = []
+        for segment in full_transcript:
+            start = float(segment.get("start", 0) or 0)
+            end = float(segment.get("end", start) or start)
+            if end < clip_start - 4.0 or start > clip_end + 4.0:
+                continue
+            nearby.append({
+                "start": round(start - clip_start, 3),
+                "end": round(end - clip_start, 3),
+                "text": str(segment.get("text", "")).strip(),
+            })
+        return nearby[:30]
 
     def _validate_plan(
         self,
@@ -346,7 +550,7 @@ class SubtitleAgent(BaseAgent):
                 continue
             source = source_by_id[cue["cue_id"]]
             translated = str(cue.get("translated_text", "")).strip()
-            line_break = str(cue.get("line_break_text", translated)).strip()
+            line_break = self._format_line_break_text(translated)
             if not translated:
                 errors.append(f"{cue.get('cue_id')} has empty translated_text")
             if any(
@@ -365,6 +569,10 @@ class SubtitleAgent(BaseAgent):
             lines = line_break.splitlines() or [""]
             if len(lines) > 2 or any(len(line) > self.max_chars for line in lines):
                 errors.append(f"{cue.get('cue_id')} exceeds line limits")
+            if re.sub(r"\s+", "", line_break) != re.sub(r"\s+", "", translated):
+                errors.append(
+                    f"{cue.get('cue_id')} line breaks omit or change text"
+                )
             duration = max(0.1, float(source["end"]) - float(source["start"]))
             compact_length = len(re.sub(r"\s+", "", line_break))
             if compact_length / duration > self.max_reading_speed:
@@ -380,6 +588,104 @@ class SubtitleAgent(BaseAgent):
                 "warning": str(cue.get("warning", "")).strip(),
             })
         return normalized, list(dict.fromkeys(errors))
+
+    def _format_line_break_text(self, text: str) -> str:
+        """Apply deterministic two-line wrapping instead of trusting Gemini."""
+        normalized = " ".join(str(text or "").split())
+        if not normalized:
+            return ""
+        lines = textwrap.wrap(
+            normalized,
+            width=self.max_chars,
+            break_long_words=True,
+            break_on_hyphens=False,
+        )
+        return "\n".join(lines) if len(lines) <= 2 else normalized
+
+    def _resegment_for_canonical_transcript(
+        self,
+        segments: List[Dict[str, Any]],
+        canonical_transcript: str,
+    ) -> List[Dict[str, Any]]:
+        """Add timing windows when corrected audio contains more text than ASR.
+
+        Whisper remains authoritative for the overall speech interval. The
+        interval is subdivided deterministically so every canonical word can
+        fit within the configured two-line subtitle capacity.
+        """
+        transcript = " ".join(str(canonical_transcript or "").split())
+        if not segments or not transcript:
+            return segments
+        capacity = max(1, self.max_chars * 2)
+        compact_length = len(re.sub(r"\s+", "", transcript))
+        start = float(segments[0]["start"])
+        end = float(segments[-1]["end"])
+        span = max(0.1, end - start)
+        required_count = max(
+            len(segments),
+            math.ceil(compact_length / capacity),
+            math.ceil(span / self.max_duration),
+        )
+        clauses = [
+            item.strip() for item in re.findall(
+                r".+?(?:[.!?。！？]+(?=\s|$)|$)", transcript
+            ) if item.strip()
+        ] or [transcript]
+        chunks: List[str] = []
+        for clause in clauses:
+            words = clause.split()
+            current: List[str] = []
+            for word in words:
+                candidate = " ".join([*current, word])
+                if current and len(re.sub(r"\s+", "", candidate)) > capacity:
+                    chunks.append(" ".join(current))
+                    current = [word]
+                else:
+                    current.append(word)
+            if current:
+                chunks.append(" ".join(current))
+
+        while len(chunks) > required_count:
+            choices = [
+                (len(chunks[index]) + len(chunks[index + 1]), index)
+                for index in range(len(chunks) - 1)
+                if len(re.sub(
+                    r"\s+", "", chunks[index] + " " + chunks[index + 1]
+                )) <= capacity
+            ]
+            if not choices:
+                break
+            _, index = min(choices)
+            chunks[index:index + 2] = [
+                chunks[index] + " " + chunks[index + 1]
+            ]
+
+        while len(chunks) < required_count:
+            index = max(range(len(chunks)), key=lambda item: len(chunks[item]))
+            parts = chunks[index].split()
+            if len(parts) < 2:
+                break
+            midpoint = max(1, len(parts) // 2)
+            chunks[index:index + 1] = [
+                " ".join(parts[:midpoint]), " ".join(parts[midpoint:])
+            ]
+
+        total_weight = max(1, sum(len(re.sub(r"\s+", "", item)) for item in chunks))
+        current_time = start
+        resegmented = []
+        for index, chunk in enumerate(chunks):
+            if index == len(chunks) - 1:
+                chunk_end = end
+            else:
+                weight = len(re.sub(r"\s+", "", chunk))
+                chunk_end = current_time + span * weight / total_weight
+            resegmented.append({
+                "start": round(current_time, 3),
+                "end": round(chunk_end, 3),
+                "text": chunk,
+            })
+            current_time = chunk_end
+        return self._assign_cue_ids(resegmented)
 
     @staticmethod
     def _uses_expected_script(language: str, text: str) -> bool:

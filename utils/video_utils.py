@@ -520,15 +520,11 @@ def burn_subtitles_into_video(
             cmd, capture_output=True, text=True, cwd=temp_dir
         )
         if result.returncode != 0:
-            raise RuntimeError(f"Subtitle burn failed: {result.stderr[:500]}")
+            raise RuntimeError(
+                f"Subtitle burn failed: {_media_error_details(result.stderr)}"
+            )
 
-    result = _run_media_command(cmd)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Subtitle burn failed: {_media_error_details(result.stderr)}"
-        )
-
-    return str(output_path)
+    return str(output)
 
 
 def extract_frame(video_path: str, timestamp: float, output_path: str) -> str:

@@ -39,6 +39,7 @@ class WindowsSubtitlePathTests(unittest.TestCase):
                 )
 
         command = run.call_args.args[0]
+        run.assert_called_once()
         self.assertEqual("subtitles='subtitle.srt'", command[command.index("-vf") + 1])
         self.assertNotIn(":", command[command.index("-vf") + 1])
         self.assertTrue(run.call_args.kwargs["cwd"])
